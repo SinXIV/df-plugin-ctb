@@ -41,6 +41,59 @@ fn choose_ctb_encode_threads() -> usize {
     env.clamp(1, hw)
 }
 
+fn cap_ctb_encode_workers_for_mask_bytes(requested: usize, expected_pixels: usize) -> usize {
+    let bytes_per_mask = expected_pixels;
+    let mut capped = requested.max(1);
+
+    // Optional override: memory budget for in-flight CTB raw masks (MB).
+    // Example: 1024 means allow about 1 GB worth of queued/working masks.
+    let budget_override = std::env::var("DF_V3_MAX_CTB_INFLIGHT_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 64)
+        .map(|mb| mb.saturating_mul(1024 * 1024));
+
+    if let Some(budget_bytes) = budget_override {
+        let allowed = (budget_bytes / bytes_per_mask.max(1)).max(1);
+        capped = capped.min(allowed);
+    }
+
+    // Each encoder worker can hold a full raw mask plus encoded output buffers.
+    // Be conservative for massive layers to prevent allocation failures.
+    if budget_override.is_none() {
+        if bytes_per_mask >= 48 * 1024 * 1024 {
+            capped = capped.min(1);
+        } else if bytes_per_mask >= 24 * 1024 * 1024 {
+            capped = capped.min(2);
+        } else if bytes_per_mask >= 12 * 1024 * 1024 {
+            capped = capped.min(4);
+        }
+    }
+
+    capped.max(1)
+}
+
+fn choose_ctb_encode_queue_depth(worker_count: usize, expected_pixels: usize) -> usize {
+    let bytes_per_mask = expected_pixels;
+    if let Some(budget_bytes) = std::env::var("DF_V3_MAX_CTB_INFLIGHT_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 64)
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+    {
+        let allowed = (budget_bytes / bytes_per_mask.max(1)).max(1);
+        return allowed.min((worker_count.saturating_mul(2)).max(1));
+    }
+
+    if bytes_per_mask >= 24 * 1024 * 1024 {
+        1
+    } else if bytes_per_mask >= 12 * 1024 * 1024 {
+        2
+    } else {
+        (worker_count.saturating_mul(2)).clamp(2, 16)
+    }
+}
+
 struct CtbRawMaskStreamingEncoder {
     job: SliceJobV3,
     work_tx: Option<mpsc::SyncSender<(u32, Vec<u8>)>>,
@@ -160,8 +213,9 @@ impl FormatEncoder for CtbPluginEncoder {
         let expected_pixels =
             (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
 
-        let worker_count = choose_ctb_encode_threads();
-        let queue_depth = (worker_count.saturating_mul(2)).clamp(2, 16);
+        let worker_count =
+            cap_ctb_encode_workers_for_mask_bytes(choose_ctb_encode_threads(), expected_pixels);
+        let queue_depth = choose_ctb_encode_queue_depth(worker_count, expected_pixels);
         let (work_tx, work_rx) = mpsc::sync_channel::<(u32, Vec<u8>)>(queue_depth);
         let (result_tx, result_rx) =
             mpsc::channel::<Result<ctb_types::CtbPreparedLayer, SlicerV3Error>>();
