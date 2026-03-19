@@ -1,0 +1,10 @@
+{
+  "CTB": {
+    "extensions": [
+      ".ctb"
+    ],
+    "displayName": "CTB (ChiTuBox)",
+    "version": "1.0",
+    "notes": "Raw-mask/RLE-based container format"
+  }
+}

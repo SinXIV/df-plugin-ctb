@@ -1,0 +1,11 @@
+[dependencies]
+# Add CTB-specific crates as implementation progresses.
+
+[optional-dependencies]
+
+[features]
+default = []
+
+[notes]
+purpose = "CTB encoding and RLE packing support"
+minimum-rust = "1.75"
