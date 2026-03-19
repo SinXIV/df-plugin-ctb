@@ -1,7 +1,7 @@
 use crate::encoders::FormatEncoder;
 use crate::engine::SlicerV3Error;
 use crate::types::{LayerAreaStatsV3, RenderedLayersV3, SliceJobV3};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::Path;
 
 pub struct CtbPluginEncoder;
@@ -11,8 +11,13 @@ pub fn create_plugin_encoder() -> Vec<Box<dyn FormatEncoder>> {
 }
 
 const DEFAULT_BINARY_THRESHOLD: u8 = 127;
-const EXPERIMENTAL_CONTAINER_MAGIC: &[u8; 8] = b"DFCTBEX1";
-const EXPERIMENTAL_CONTAINER_VERSION: u32 = 1;
+const CTB_DRAFT_MAGIC: &[u8; 8] = b"DFCTBDR1";
+const CTB_DRAFT_VERSION: u32 = 2;
+const CTB_DRAFT_HEADER_SIZE: u32 = 80;
+const CTB_DRAFT_SECTION_ENTRY_SIZE: u32 = 20;
+const SECTION_ID_META: [u8; 4] = *b"META";
+const SECTION_ID_LUT0: [u8; 4] = *b"LUT0";
+const SECTION_ID_LAYR: [u8; 4] = *b"LAYR";
 
 #[derive(Debug, Clone)]
 struct CtbPreparedLayer {
@@ -20,6 +25,22 @@ struct CtbPreparedLayer {
     source_len: usize,
     encoded: Vec<u8>,
     lit_pixels: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CtbTimingModel {
+    normal_exposure_sec: f32,
+    bottom_exposure_sec: f32,
+    bottom_layer_count: u32,
+    lift_distance_mm: f32,
+    lift_speed_mm_min: f32,
+    retract_speed_mm_min: f32,
+}
+
+#[derive(Debug, Clone)]
+struct DraftSection {
+    id: [u8; 4],
+    bytes: Vec<u8>,
 }
 
 fn rle_encode_mask_row_major(mask: &[u8]) -> Vec<u8> {
@@ -109,6 +130,40 @@ fn parse_experimental_serialize_from_metadata(metadata_json: &str) -> bool {
     direct.or(nested).unwrap_or(false)
 }
 
+fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTimingModel {
+    let Ok(meta) = serde_json::from_str::<Value>(metadata_json) else {
+        return CtbTimingModel {
+            normal_exposure_sec: 0.0,
+            bottom_exposure_sec: 0.0,
+            bottom_layer_count: 0,
+            lift_distance_mm: 0.0,
+            lift_speed_mm_min: 0.0,
+            retract_speed_mm_min: 0.0,
+        };
+    };
+
+    let material = meta.get("material").and_then(Value::as_object);
+    let read_f32 = |key: &str| {
+        material
+            .and_then(|m| m.get(key))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0) as f32
+    };
+    let bottom_layer_count = material
+        .and_then(|m| m.get("bottomLayerCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+
+    CtbTimingModel {
+        normal_exposure_sec: read_f32("normalExposureSec"),
+        bottom_exposure_sec: read_f32("bottomExposureSec"),
+        bottom_layer_count,
+        lift_distance_mm: read_f32("liftDistanceMm"),
+        lift_speed_mm_min: read_f32("liftSpeedMmMin"),
+        retract_speed_mm_min: read_f32("retractSpeedMmMin"),
+    }
+}
+
 fn prepare_layers_for_ctb(raw_masks: &[Vec<u8>], threshold: u8) -> Vec<CtbPreparedLayer> {
     raw_masks
         .iter()
@@ -138,40 +193,138 @@ fn push_f32(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-fn build_experimental_container_bytes(
-    job: &SliceJobV3,
-    prepared: &[CtbPreparedLayer],
-    threshold: u8,
-) -> Result<Vec<u8>, SlicerV3Error> {
-    let mut out = Vec::new();
+fn push_section_entry(out: &mut Vec<u8>, section_id: [u8; 4], offset: u64, size: u64) {
+    out.extend_from_slice(&section_id);
+    push_u64(out, offset);
+    push_u64(out, size);
+}
 
-    // Header
-    out.extend_from_slice(EXPERIMENTAL_CONTAINER_MAGIC);
-    push_u32(&mut out, EXPERIMENTAL_CONTAINER_VERSION);
-    push_u32(&mut out, job.source_width_px);
-    push_u32(&mut out, job.source_height_px);
-    push_u32(&mut out, prepared.len() as u32);
-    out.push(threshold);
-    out.extend_from_slice(&[0, 0, 0]); // reserved
-    push_f32(&mut out, job.layer_height_mm);
-    push_f32(&mut out, job.build_width_mm);
-    push_f32(&mut out, job.build_depth_mm);
-    push_u32(&mut out, prepared.len() as u32); // table entry count
+fn build_layer_table_section(prepared: &[CtbPreparedLayer]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prepared.len() * 24);
+    let mut encoded_offset: u64 = 0;
 
-    // Table entries (offsets are relative to payload start).
-    let mut payload_offset: u64 = 0;
     for layer in prepared {
         push_u32(&mut out, layer.index as u32);
         push_u32(&mut out, layer.source_len as u32);
         push_u32(&mut out, layer.lit_pixels);
         push_u32(&mut out, layer.encoded.len() as u32);
-        push_u64(&mut out, payload_offset);
-        payload_offset = payload_offset.saturating_add(layer.encoded.len() as u64);
+        push_u64(&mut out, encoded_offset);
+        encoded_offset = encoded_offset.saturating_add(layer.encoded.len() as u64);
     }
 
-    // Payload block
-    for layer in prepared {
-        out.extend_from_slice(&layer.encoded);
+    out
+}
+
+fn build_metadata_section(
+    job: &SliceJobV3,
+    prepared: &[CtbPreparedLayer],
+    threshold: u8,
+    timing: CtbTimingModel,
+) -> Result<Vec<u8>, SlicerV3Error> {
+    let source_bytes: u64 = prepared.iter().map(|l| l.source_len as u64).sum();
+    let encoded_bytes: u64 = prepared.iter().map(|l| l.encoded.len() as u64).sum();
+    let lit_pixels: u64 = prepared.iter().map(|l| l.lit_pixels as u64).sum();
+
+    let metadata = json!({
+        "container": {
+            "kind": "ctb-draft",
+            "version": CTB_DRAFT_VERSION,
+            "experimental": true,
+        },
+        "raster": {
+            "widthPx": job.source_width_px,
+            "heightPx": job.source_height_px,
+            "layers": prepared.len(),
+            "binaryThreshold": threshold,
+            "sourceBytes": source_bytes,
+            "encodedBytes": encoded_bytes,
+            "litPixels": lit_pixels,
+        },
+        "timing": {
+            "normalExposureSec": timing.normal_exposure_sec,
+            "bottomExposureSec": timing.bottom_exposure_sec,
+            "bottomLayerCount": timing.bottom_layer_count,
+            "liftDistanceMm": timing.lift_distance_mm,
+            "liftSpeedMmMin": timing.lift_speed_mm_min,
+            "retractSpeedMmMin": timing.retract_speed_mm_min,
+        },
+        "build": {
+            "buildWidthMm": job.build_width_mm,
+            "buildDepthMm": job.build_depth_mm,
+            "layerHeightMm": job.layer_height_mm,
+            "mirrorX": job.mirror_x,
+            "mirrorY": job.mirror_y,
+            "antiAliasingLevel": job.anti_aliasing_level,
+        }
+    });
+
+    Ok(serde_json::to_vec(&metadata)?)
+}
+
+fn build_experimental_container_bytes(
+    job: &SliceJobV3,
+    prepared: &[CtbPreparedLayer],
+    threshold: u8,
+) -> Result<Vec<u8>, SlicerV3Error> {
+    let timing = parse_timing_model_from_metadata(&job.metadata_json);
+    let section_meta = DraftSection {
+        id: SECTION_ID_META,
+        bytes: build_metadata_section(job, prepared, threshold, timing)?,
+    };
+    let section_lut = DraftSection {
+        id: SECTION_ID_LUT0,
+        bytes: build_layer_table_section(prepared),
+    };
+    let section_layers = DraftSection {
+        id: SECTION_ID_LAYR,
+        bytes: prepared
+            .iter()
+            .flat_map(|l| l.encoded.iter().copied())
+            .collect(),
+    };
+
+    let sections = vec![section_meta, section_lut, section_layers];
+    let section_count = sections.len() as u32;
+    let section_table_size = section_count.saturating_mul(CTB_DRAFT_SECTION_ENTRY_SIZE);
+    let section_table_offset = CTB_DRAFT_HEADER_SIZE as u64;
+    let payload_offset = section_table_offset.saturating_add(section_table_size as u64);
+
+    let payload_size: u64 = sections.iter().map(|s| s.bytes.len() as u64).sum();
+    let total_size = payload_offset.saturating_add(payload_size);
+
+    let mut out = Vec::with_capacity(total_size as usize);
+
+    // Header (80 bytes)
+    out.extend_from_slice(CTB_DRAFT_MAGIC); // 8
+    push_u32(&mut out, CTB_DRAFT_VERSION); // 12
+    push_u32(&mut out, CTB_DRAFT_HEADER_SIZE); // 16
+    push_u32(&mut out, job.source_width_px); // 20
+    push_u32(&mut out, job.source_height_px); // 24
+    push_u32(&mut out, prepared.len() as u32); // 28
+    out.push(threshold); // 29
+    out.extend_from_slice(&[0, 0, 0]); // 32 reserved
+    push_f32(&mut out, job.layer_height_mm); // 36
+    push_f32(&mut out, job.build_width_mm); // 40
+    push_f32(&mut out, job.build_depth_mm); // 44
+    push_u32(&mut out, section_count); // 48
+    push_u64(&mut out, section_table_offset); // 56
+    push_u64(&mut out, payload_offset); // 64
+    push_u64(&mut out, total_size); // 72
+    push_u64(&mut out, 0); // 80 reserved
+
+    // Section table + payload
+    let mut running_payload_offset = payload_offset;
+    for section in &sections {
+        push_section_entry(
+            &mut out,
+            section.id,
+            running_payload_offset,
+            section.bytes.len() as u64,
+        );
+        running_payload_offset = running_payload_offset.saturating_add(section.bytes.len() as u64);
+    }
+    for section in sections {
+        out.extend_from_slice(&section.bytes);
     }
 
     if out.is_empty() {
@@ -266,7 +419,8 @@ mod tests {
     use super::{
         build_experimental_container_bytes, normalize_to_binary_mask,
         parse_experimental_serialize_from_metadata, parse_threshold_from_metadata,
-        rle_encode_mask_row_major, CtbPreparedLayer, EXPERIMENTAL_CONTAINER_MAGIC,
+        rle_encode_mask_row_major, CtbPreparedLayer, CTB_DRAFT_MAGIC,
+        CTB_DRAFT_HEADER_SIZE, SECTION_ID_LAYR, SECTION_ID_LUT0, SECTION_ID_META,
     };
     use crate::types::SliceJobV3;
 
@@ -360,20 +514,41 @@ mod tests {
         ];
 
         let bytes = build_experimental_container_bytes(&job, &prepared, 127).expect("container should build");
-        assert!(bytes.len() > 32);
-        assert_eq!(&bytes[0..8], EXPERIMENTAL_CONTAINER_MAGIC);
+        assert!(bytes.len() > 64);
+        assert_eq!(&bytes[0..8], CTB_DRAFT_MAGIC);
 
         // header offsets:
         // 0..8 magic
         // 8..12 version
-        // 12..16 width
-        // 16..20 height
-        // 20..24 layer_count
-        let width = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-        let height = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
-        let layers = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
+        // 16..20 width
+        // 20..24 height
+        // 24..28 layer_count
+        let width = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        let height = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
+        let layers = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
         assert_eq!(width, 4);
         assert_eq!(height, 4);
         assert_eq!(layers, 2);
+    }
+
+    #[test]
+    fn experimental_container_writes_expected_section_ids() {
+        let job = make_test_job();
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+            lit_pixels: 1,
+        }];
+
+        let bytes = build_experimental_container_bytes(&job, &prepared, 127).expect("container should build");
+        let table_offset = CTB_DRAFT_HEADER_SIZE as usize;
+        let first = &bytes[table_offset..table_offset + 4];
+        let second = &bytes[table_offset + 20..table_offset + 24];
+        let third = &bytes[table_offset + 40..table_offset + 44];
+
+        assert_eq!(first, SECTION_ID_META);
+        assert_eq!(second, SECTION_ID_LUT0);
+        assert_eq!(third, SECTION_ID_LAYR);
     }
 }
