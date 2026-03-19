@@ -2,6 +2,7 @@ use crate::engine::SlicerV3Error;
 use crate::types::SliceJobV3;
 use base64::Engine;
 use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::ctb_types::{
     CtbAesModel, CtbBuildModel, CtbResinModel, CtbTimingModel, CTB_DISCLAIMER_B64,
@@ -109,9 +110,43 @@ fn parse_bool_meta(meta: &Value, path0: &str, path1: &str) -> Option<bool> {
         .and_then(Value::as_bool)
 }
 
+fn parse_f32_meta(meta: &Value, path0: &str, path1: &str) -> Option<f32> {
+    meta.get(path0)
+        .and_then(|v| v.get(path1))
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+}
+
+fn parse_timestamp_meta(meta: &Value, path0: &str, path1: &str) -> Option<u32> {
+    let node = meta.get(path0).and_then(|v| v.get(path1))?;
+    if let Some(v) = node.as_u64() {
+        return Some(v.min(u32::MAX as u64) as u32);
+    }
+    if let Some(v) = node.as_i64() {
+        return Some(v.max(0).min(u32::MAX as i64) as u32);
+    }
+    if let Some(s) = node.as_str() {
+        if let Ok(parsed) = s.trim().parse::<u64>() {
+            return Some(parsed.min(u32::MAX as u64) as u32);
+        }
+    }
+    None
+}
+
+fn unix_now_u32() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs().min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
 pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel {
     let mut version = DEFAULT_CTB_VERSION;
     let mut machine_name = DEFAULT_MACHINE_NAME.to_string();
+    let mut bed_size_z_mm = (job.layer_height_mm.max(0.0) * (job.total_layers as f32)).max(0.0);
+    let mut created_date_unix = unix_now_u32();
+    let mut modified_date_unix = created_date_unix;
     let mut anti_alias_level = 1_u32;
     let mut layer_xor_key = 0_u32;
     let mut projector_type = if job.mirror_x || job.mirror_y { 1 } else { 0 };
@@ -141,6 +176,86 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
         machine_name = machine_direct
             .or(machine_nested)
             .unwrap_or_else(|| DEFAULT_MACHINE_NAME.to_string());
+
+        if let Some(v) = parse_str_meta(&meta, "ctb", "MachineName")
+            .or_else(|| {
+                meta.get("export")
+                    .and_then(|v| v.get("ctb"))
+                    .and_then(|v| v.get("MachineName"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .or_else(|| parse_str_meta(&meta, "printer", "machineName"))
+            .or_else(|| parse_str_meta(&meta, "printer", "MachineName"))
+            .or_else(|| parse_str_meta(&meta, "printer", "name"))
+        {
+            if !v.trim().is_empty() {
+                machine_name = v;
+            }
+        }
+
+        if let Some(v) = parse_f32_meta(&meta, "ctb", "bedSizeZ")
+            .or_else(|| parse_f32_meta(&meta, "ctb", "BedSizeZ"))
+            .or_else(|| {
+                meta.get("export")
+                    .and_then(|x| x.get("ctb"))
+                    .and_then(|x| x.get("bedSizeZ"))
+                    .and_then(Value::as_f64)
+                    .map(|x| x as f32)
+            })
+            .or_else(|| {
+                meta.get("export")
+                    .and_then(|x| x.get("ctb"))
+                    .and_then(|x| x.get("BedSizeZ"))
+                    .and_then(Value::as_f64)
+                    .map(|x| x as f32)
+            })
+            .or_else(|| {
+                meta.get("printer")
+                    .and_then(|x| x.get("buildVolumeMm"))
+                    .and_then(|x| x.get("height"))
+                    .and_then(Value::as_f64)
+                    .map(|x| x as f32)
+            })
+            .or_else(|| parse_f32_meta(&meta, "printer", "bedSizeZ"))
+            .or_else(|| parse_f32_meta(&meta, "printer", "BedSizeZ"))
+        {
+            if v.is_finite() && v > 0.0 {
+                bed_size_z_mm = v;
+            }
+        }
+
+        if let Some(v) = parse_timestamp_meta(&meta, "ctb", "createdDate")
+            .or_else(|| parse_timestamp_meta(&meta, "ctb", "CreatedDate"))
+            .or_else(|| {
+                parse_timestamp_meta(&meta, "export", "createdDate")
+                    .or_else(|| parse_timestamp_meta(&meta, "export", "CreatedDate"))
+            })
+        {
+            created_date_unix = v;
+        }
+
+        if let Some(v) = parse_timestamp_meta(&meta, "ctb", "modifiedDate")
+            .or_else(|| parse_timestamp_meta(&meta, "ctb", "ModifiedDate"))
+            .or_else(|| {
+                meta.get("export")
+                    .and_then(|x| x.get("ctb"))
+                    .and_then(|x| x.get("modifiedDate"))
+                    .and_then(Value::as_u64)
+                    .map(|x| x.min(u32::MAX as u64) as u32)
+            })
+            .or_else(|| {
+                meta.get("export")
+                    .and_then(|x| x.get("ctb"))
+                    .and_then(|x| x.get("ModifiedDate"))
+                    .and_then(Value::as_u64)
+                    .map(|x| x.min(u32::MAX as u64) as u32)
+            })
+            .or_else(|| parse_timestamp_meta(&meta, "metadata", "modifiedDate"))
+            .or_else(|| parse_timestamp_meta(&meta, "metadata", "ModifiedDate"))
+        {
+            modified_date_unix = v;
+        }
 
         let aa_direct = parse_u32_meta(&meta, "ctb", "antiAliasLevel");
         let aa_nested = meta
@@ -183,6 +298,9 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
     CtbBuildModel {
         version,
         machine_name,
+        bed_size_z_mm,
+        created_date_unix,
+        modified_date_unix,
         anti_alias_level,
         layer_xor_key,
         projector_type,

@@ -530,6 +530,55 @@ mod tests {
     }
 
     #[test]
+    fn ctb_container_transfers_machine_name_bedsizez_and_modified_date() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{
+            "ctb": {
+                "version": 4,
+                "MachineName": "DF Mega Printer",
+                "ModifiedDate": 1735689600
+            },
+            "printer": {
+                "buildVolumeMm": {
+                    "width": 10,
+                    "depth": 20,
+                    "height": 180
+                }
+            }
+        }"#
+        .to_string();
+
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
+
+        let bed_size_z = f32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        let modified_date = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        assert!((bed_size_z - 180.0).abs() < 0.001);
+        assert_eq!(modified_date, 1_735_689_600);
+
+        let slicer_offset = u32::from_le_bytes(bytes[104..108].try_into().unwrap()) as usize;
+        let machine_name_offset = u32::from_le_bytes(
+            bytes[slicer_offset + 28..slicer_offset + 32]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let machine_name_size = u32::from_le_bytes(
+            bytes[slicer_offset + 32..slicer_offset + 36]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let machine_name = String::from_utf8_lossy(
+            &bytes[machine_name_offset..machine_name_offset.saturating_add(machine_name_size)],
+        );
+        assert_eq!(machine_name, "DF Mega Printer");
+    }
+
+    #[test]
     fn ctb_container_embeds_preview_offsets() {
         let job = make_test_job();
         let prepared = vec![CtbPreparedLayer {

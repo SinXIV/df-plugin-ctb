@@ -258,9 +258,9 @@ fn write_ctb_header(
     push_u32(out, version);
     push_f32(out, job.build_width_mm);
     push_f32(out, job.build_depth_mm);
-    push_f32(out, 0.0);
-    push_u32(out, 0);
-    push_u32(out, 0);
+    push_f32(out, build.bed_size_z_mm.max(0.0));
+    push_u32(out, build.created_date_unix);
+    push_u32(out, build.modified_date_unix);
     push_f32(out, job.layer_height_mm * layer_count as f32);
     push_f32(out, job.layer_height_mm);
     push_f32(out, timing.normal_exposure_sec);

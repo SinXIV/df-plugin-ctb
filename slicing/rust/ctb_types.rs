@@ -59,6 +59,9 @@ pub(super) struct CtbTimingModel {
 pub(super) struct CtbBuildModel {
     pub version: u32,
     pub machine_name: String,
+    pub bed_size_z_mm: f32,
+    pub created_date_unix: u32,
+    pub modified_date_unix: u32,
     pub anti_alias_level: u32,
     pub layer_xor_key: u32,
     pub projector_type: u32,
