@@ -15,6 +15,8 @@ use ctb_layout::{
 };
 use ctb_metadata::{parse_ctb_build_model_from_job, parse_threshold_from_metadata};
 use std::path::Path;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 
 #[cfg(test)]
 use ctb_layout::{
@@ -27,12 +29,24 @@ use ctb_types::{CtbPreparedLayer, CTB_DISCLAIMER_SIZE, CTB_HEADER_SIZE};
 
 pub struct CtbPluginEncoder;
 
+fn choose_ctb_encode_threads() -> usize {
+    let hw = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let env = std::env::var("DF_V3_CTB_ENCODE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(hw);
+    env.clamp(1, hw)
+}
+
 struct CtbRawMaskStreamingEncoder {
     job: SliceJobV3,
-    threshold: u8,
-    layer_xor_key: u32,
-    expected_pixels: usize,
-    prepared: Vec<ctb_types::CtbPreparedLayer>,
+    work_tx: Option<mpsc::SyncSender<(u32, Vec<u8>)>>,
+    result_rx: mpsc::Receiver<Result<ctb_types::CtbPreparedLayer, SlicerV3Error>>,
+    workers: Vec<thread::JoinHandle<()>>,
+    consumed_layers: u32,
 }
 
 impl RawMaskStreamEncoder for CtbRawMaskStreamingEncoder {
@@ -41,31 +55,80 @@ impl RawMaskStreamEncoder for CtbRawMaskStreamingEncoder {
         layer_index: u32,
         raw_mask: Vec<u8>,
     ) -> Result<(), SlicerV3Error> {
-        if raw_mask.len() != self.expected_pixels {
-            return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
-                "CTB layer {layer_index} size mismatch: expected {} bytes, got {}",
-                self.expected_pixels,
-                raw_mask.len()
-            )));
-        }
+        let Some(ref tx) = self.work_tx else {
+            return Err(SlicerV3Error::MissingRenderedLayerPayload(
+                "CTB streaming encoder no longer accepts layers after finalize".to_string(),
+            ));
+        };
 
-        self.prepared.push(encode_single_ctb_layer_from_raw_mask(
-            layer_index as usize,
-            &raw_mask,
-            self.threshold,
-            self.layer_xor_key,
-        ));
+        tx.send((layer_index, raw_mask)).map_err(|_| {
+            SlicerV3Error::MissingRenderedLayerPayload(
+                "CTB streaming worker channel closed unexpectedly".to_string(),
+            )
+        })?;
+        self.consumed_layers = self.consumed_layers.saturating_add(1);
         Ok(())
     }
 
-    fn finalize_to_bytes(self: Box<Self>) -> Result<Vec<u8>, SlicerV3Error> {
-        if self.prepared.is_empty() {
+    fn finalize_to_bytes(mut self: Box<Self>) -> Result<Vec<u8>, SlicerV3Error> {
+        if self.consumed_layers == 0 {
             return Err(SlicerV3Error::MissingRenderedLayerPayload(
                 "no rendered layers were provided for CTB encoding".to_string(),
             ));
         }
 
-        build_ctb_container_bytes(&self.job, &self.prepared)
+        // Close producer channel and let workers drain outstanding tasks.
+        let _ = self.work_tx.take();
+
+        while let Some(handle) = self.workers.pop() {
+            if handle.join().is_err() {
+                return Err(SlicerV3Error::UnsupportedOutput(
+                    "CTB streaming worker panicked".to_string(),
+                ));
+            }
+        }
+
+        let expected_layers = self.consumed_layers as usize;
+        let mut ordered: Vec<Option<ctb_types::CtbPreparedLayer>> =
+            Vec::with_capacity(expected_layers);
+        ordered.resize_with(expected_layers, || None);
+
+        for _ in 0..expected_layers {
+            let msg = self.result_rx.recv().map_err(|_| {
+                SlicerV3Error::MissingRenderedLayerPayload(
+                    "CTB streaming worker results ended unexpectedly".to_string(),
+                )
+            })?;
+
+            let prepared = msg?;
+            if prepared.index >= expected_layers {
+                return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
+                    "CTB worker emitted out-of-range layer index {} (expected < {})",
+                    prepared.index, expected_layers
+                )));
+            }
+            let index = prepared.index;
+            if ordered[index].is_some() {
+                return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
+                    "CTB worker emitted duplicate layer index {}",
+                    index
+                )));
+            }
+            ordered[index] = Some(prepared);
+        }
+
+        let mut prepared = Vec::with_capacity(expected_layers);
+        for (index, layer) in ordered.into_iter().enumerate() {
+            let Some(layer) = layer else {
+                return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
+                    "CTB layer {} missing from streaming worker output",
+                    index
+                )));
+            };
+            prepared.push(layer);
+        }
+
+        build_ctb_container_bytes(&self.job, &prepared)
     }
 }
 
@@ -97,12 +160,68 @@ impl FormatEncoder for CtbPluginEncoder {
         let expected_pixels =
             (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
 
+        let worker_count = choose_ctb_encode_threads();
+        let queue_depth = (worker_count.saturating_mul(2)).clamp(2, 16);
+        let (work_tx, work_rx) = mpsc::sync_channel::<(u32, Vec<u8>)>(queue_depth);
+        let (result_tx, result_rx) =
+            mpsc::channel::<Result<ctb_types::CtbPreparedLayer, SlicerV3Error>>();
+        let work_rx = Arc::new(Mutex::new(work_rx));
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let work_rx = Arc::clone(&work_rx);
+            let result_tx = result_tx.clone();
+            let worker_threshold = threshold;
+            let worker_layer_xor_key = build.layer_xor_key;
+            let worker_expected_pixels = expected_pixels;
+
+            let handle = thread::spawn(move || loop {
+                let task = match work_rx.lock() {
+                    Ok(rx) => rx.recv(),
+                    Err(_) => {
+                        let _ = result_tx.send(Err(SlicerV3Error::UnsupportedOutput(
+                            "CTB streaming work queue lock poisoned".to_string(),
+                        )));
+                        break;
+                    }
+                };
+
+                let Ok((layer_index, raw_mask)) = task else {
+                    break;
+                };
+
+                if raw_mask.len() != worker_expected_pixels {
+                    let _ =
+                        result_tx.send(Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
+                            "CTB layer {layer_index} size mismatch: expected {} bytes, got {}",
+                            worker_expected_pixels,
+                            raw_mask.len()
+                        ))));
+                    continue;
+                }
+
+                let prepared = encode_single_ctb_layer_from_raw_mask(
+                    layer_index as usize,
+                    &raw_mask,
+                    worker_threshold,
+                    worker_layer_xor_key,
+                );
+
+                if result_tx.send(Ok(prepared)).is_err() {
+                    break;
+                }
+            });
+
+            workers.push(handle);
+        }
+        drop(result_tx);
+
         Ok(Some(Box::new(CtbRawMaskStreamingEncoder {
             job: job.clone(),
-            threshold,
-            layer_xor_key: build.layer_xor_key,
-            expected_pixels,
-            prepared: Vec::with_capacity(job.total_layers as usize),
+            work_tx: Some(work_tx),
+            result_rx,
+            workers,
+            consumed_layers: 0,
         })))
     }
 
