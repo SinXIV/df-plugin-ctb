@@ -48,27 +48,70 @@ fn rle_encode_mask_row_major(mask: &[u8]) -> Vec<u8> {
         return Vec::new();
     }
 
-    // Run packet: [run_len_le_u16, run_value_u8].
-    // A 16-bit run length avoids pathological expansion on large uniform spans.
-    let mut out = Vec::with_capacity(mask.len() / 3);
+    // CTB-style run format (clean-room behavior mapping):
+    // - First byte stores 7-bit grayscale value (value >> 1).
+    // - High bit indicates whether a run-length field follows.
+    // - Run-length field uses variable-length prefixes for larger spans.
+    //
+    // For binary masks (0 / 255), this maps to values 0x00 and 0x7f.
+    let mut out = Vec::with_capacity(mask.len() / 2);
     let mut run_value = mask[0];
-    let mut run_len: u16 = 1;
+    let mut run_len: u32 = 1;
 
     for &px in &mask[1..] {
-        if px == run_value && run_len < u16::MAX {
+        if px == run_value {
             run_len = run_len.saturating_add(1);
             continue;
         }
 
-        out.extend_from_slice(&run_len.to_le_bytes());
-        out.push(run_value);
+        push_ctb_style_run(&mut out, run_len, run_value);
         run_value = px;
         run_len = 1;
     }
 
-    out.extend_from_slice(&run_len.to_le_bytes());
-    out.push(run_value);
+    push_ctb_style_run(&mut out, run_len, run_value);
     out
+}
+
+fn push_ctb_style_run(out: &mut Vec<u8>, len: u32, value_8bit: u8) {
+    if len == 0 {
+        return;
+    }
+
+    let mut code = value_8bit >> 1; // 8-bit grayscale -> 7-bit storage
+    if len > 1 {
+        code |= 0x80;
+    }
+    out.push(code);
+
+    if len <= 1 {
+        return;
+    }
+
+    if len <= 0x7f {
+        out.push(len as u8);
+        return;
+    }
+
+    if len <= 0x3fff {
+        out.push(((len >> 8) as u8) | 0x80);
+        out.push(len as u8);
+        return;
+    }
+
+    if len <= 0x1f_ffff {
+        out.push(((len >> 16) as u8) | 0xc0);
+        out.push((len >> 8) as u8);
+        out.push(len as u8);
+        return;
+    }
+
+    // Highest currently-supported span envelope in known CTB family layouts.
+    let clamped = len.min(0x0fff_ffff);
+    out.push(((clamped >> 24) as u8) | 0xe0);
+    out.push((clamped >> 16) as u8);
+    out.push((clamped >> 8) as u8);
+    out.push(clamped as u8);
 }
 
 fn normalize_to_binary_mask(mask: &[u8], threshold: u8) -> (Vec<u8>, u32) {
@@ -419,7 +462,7 @@ mod tests {
     use super::{
         build_experimental_container_bytes, normalize_to_binary_mask,
         parse_experimental_serialize_from_metadata, parse_threshold_from_metadata,
-        rle_encode_mask_row_major, CtbPreparedLayer, CTB_DRAFT_MAGIC,
+        push_ctb_style_run, rle_encode_mask_row_major, CtbPreparedLayer, CTB_DRAFT_MAGIC,
         CTB_DRAFT_HEADER_SIZE, SECTION_ID_LAYR, SECTION_ID_LUT0, SECTION_ID_META,
     };
     use crate::types::SliceJobV3;
@@ -456,17 +499,28 @@ mod tests {
 
     #[test]
     fn rle_encodes_simple_runs() {
-        // Runs: 2x0, 3x255, 1x0
+        // Runs: 2x0, 3x255, 1x0 in CTB-style packetization.
         let encoded = rle_encode_mask_row_major(&[0, 0, 255, 255, 255, 0]);
-        assert_eq!(encoded, vec![2, 0, 0, 3, 0, 255, 1, 0, 0]);
+        assert_eq!(encoded, vec![0x80, 0x02, 0xff, 0x03, 0x00]);
     }
 
     #[test]
     fn rle_handles_long_runs_above_u8() {
         let input = vec![255u8; 300];
         let encoded = rle_encode_mask_row_major(&input);
-        // One run, length=300 => 0x012C (little-endian [44,1]), value=255
-        assert_eq!(encoded, vec![44, 1, 255]);
+        // One run, length=300 => 0x012C with 0x80-prefixed 2-byte run length.
+        assert_eq!(encoded, vec![0xff, 0x81, 0x2c]);
+    }
+
+    #[test]
+    fn ctb_run_encoder_supports_4byte_span_prefix() {
+        let mut out = Vec::new();
+        push_ctb_style_run(&mut out, 0x2A_BC_DE_u32, 255);
+
+        // code(255>>1) with run-flag + 4-byte run prefix.
+        assert_eq!(out[0], 0xff);
+        assert_eq!(out[1] & 0xE0, 0xE0);
+        assert_eq!(out.len(), 5);
     }
 
     #[test]
