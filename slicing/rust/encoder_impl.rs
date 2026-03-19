@@ -5,9 +5,14 @@ mod ctb_preview;
 mod ctb_types;
 
 use crate::encoders::FormatEncoder;
+use crate::encoders::RawMaskStreamEncoder;
 use crate::engine::SlicerV3Error;
 use crate::types::{LayerAreaStatsV3, RenderedLayersV3, SliceJobV3};
-use ctb_layout::{build_ctb_container_bytes, prepare_layers_for_ctb};
+use ctb_layout::{
+    build_ctb_container_bytes, build_ctb_container_bytes_with_progress,
+    encode_single_ctb_layer_from_raw_mask, prepare_layers_for_ctb,
+    prepare_layers_for_ctb_with_progress,
+};
 use ctb_metadata::{parse_ctb_build_model_from_job, parse_threshold_from_metadata};
 use std::path::Path;
 
@@ -21,6 +26,48 @@ use ctb_metadata::decode_embedded_disclaimer_bytes;
 use ctb_types::{CtbPreparedLayer, CTB_DISCLAIMER_SIZE, CTB_HEADER_SIZE};
 
 pub struct CtbPluginEncoder;
+
+struct CtbRawMaskStreamingEncoder {
+    job: SliceJobV3,
+    threshold: u8,
+    layer_xor_key: u32,
+    expected_pixels: usize,
+    prepared: Vec<ctb_types::CtbPreparedLayer>,
+}
+
+impl RawMaskStreamEncoder for CtbRawMaskStreamingEncoder {
+    fn consume_raw_mask_layer(
+        &mut self,
+        layer_index: u32,
+        raw_mask: Vec<u8>,
+    ) -> Result<(), SlicerV3Error> {
+        if raw_mask.len() != self.expected_pixels {
+            return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
+                "CTB layer {layer_index} size mismatch: expected {} bytes, got {}",
+                self.expected_pixels,
+                raw_mask.len()
+            )));
+        }
+
+        self.prepared.push(encode_single_ctb_layer_from_raw_mask(
+            layer_index as usize,
+            &raw_mask,
+            self.threshold,
+            self.layer_xor_key,
+        ));
+        Ok(())
+    }
+
+    fn finalize_to_bytes(self: Box<Self>) -> Result<Vec<u8>, SlicerV3Error> {
+        if self.prepared.is_empty() {
+            return Err(SlicerV3Error::MissingRenderedLayerPayload(
+                "no rendered layers were provided for CTB encoding".to_string(),
+            ));
+        }
+
+        build_ctb_container_bytes(&self.job, &self.prepared)
+    }
+}
 
 pub fn create_plugin_encoder() -> Vec<Box<dyn FormatEncoder>> {
     vec![Box::new(CtbPluginEncoder)]
@@ -39,6 +86,119 @@ impl FormatEncoder for CtbPluginEncoder {
 
     fn requires_raw_mask_layers(&self) -> bool {
         true
+    }
+
+    fn create_raw_mask_stream_encoder(
+        &self,
+        job: &SliceJobV3,
+    ) -> Result<Option<Box<dyn RawMaskStreamEncoder>>, SlicerV3Error> {
+        let threshold = parse_threshold_from_metadata(&job.metadata_json);
+        let build = parse_ctb_build_model_from_job(job);
+        let expected_pixels =
+            (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
+
+        Ok(Some(Box::new(CtbRawMaskStreamingEncoder {
+            job: job.clone(),
+            threshold,
+            layer_xor_key: build.layer_xor_key,
+            expected_pixels,
+            prepared: Vec::with_capacity(job.total_layers as usize),
+        })))
+    }
+
+    fn estimate_encode_progress_units(&self, rendered_layers: &RenderedLayersV3) -> u32 {
+        let layers = rendered_layers
+            .raw_mask_layers
+            .as_ref()
+            .map(|v| v.len() as u32)
+            .unwrap_or(0);
+        layers.saturating_mul(2).saturating_add(1).max(1)
+    }
+
+    fn encode_container_from_rendered_layers_with_progress(
+        &self,
+        job: &SliceJobV3,
+        rendered_layers: &RenderedLayersV3,
+        _layer_area_stats: &[LayerAreaStatsV3],
+        on_progress: Option<&dyn Fn(u32, u32)>,
+    ) -> Result<Vec<u8>, SlicerV3Error> {
+        let Some(raw_masks) = rendered_layers.raw_mask_layers.as_ref() else {
+            return Err(SlicerV3Error::MissingRenderedLayerPayload(
+                "raw mask layers are required for CTB encoding".to_string(),
+            ));
+        };
+
+        if raw_masks.is_empty() {
+            return Err(SlicerV3Error::MissingRenderedLayerPayload(
+                "no rendered layers were provided for CTB encoding".to_string(),
+            ));
+        }
+
+        let expected_pixels =
+            (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
+        for (idx, layer) in raw_masks.iter().enumerate() {
+            if layer.len() != expected_pixels {
+                return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
+                    "CTB layer {idx} size mismatch: expected {expected_pixels} bytes, got {}",
+                    layer.len()
+                )));
+            }
+        }
+
+        let threshold = parse_threshold_from_metadata(&job.metadata_json);
+        let build = parse_ctb_build_model_from_job(job);
+
+        let total_prepare = raw_masks.len() as u32;
+        let total_layout = raw_masks.len() as u32;
+        let total_progress = total_prepare
+            .saturating_add(total_layout)
+            .saturating_add(1)
+            .max(1);
+
+        let prepare_progress = on_progress.map(|progress| {
+            move |done: u32, total: u32| {
+                let safe_total = total.max(1);
+                let mapped = ((done.min(safe_total) as u64) * (total_prepare as u64)
+                    / (safe_total as u64)) as u32;
+                progress(mapped, total_progress);
+            }
+        });
+
+        let prepared = prepare_layers_for_ctb_with_progress(
+            raw_masks,
+            threshold,
+            build.layer_xor_key,
+            prepare_progress.as_ref().map(|cb| cb as &dyn Fn(u32, u32)),
+        );
+
+        let source_bytes: usize = prepared.iter().map(|l| l.source_len).sum();
+        let encoded_bytes: usize = prepared.iter().map(|l| l.encoded.len()).sum();
+        if encoded_bytes == 0 {
+            return Err(SlicerV3Error::UnsupportedOutput(format!(
+                "CTB encoding produced empty payload (source bytes: {source_bytes})"
+            )));
+        }
+
+        let layout_progress = on_progress.map(|progress| {
+            move |done: u32, total: u32| {
+                let safe_total = total.max(1);
+                let mapped = ((done.min(safe_total) as u64) * (total_layout as u64)
+                    / (safe_total as u64)) as u32;
+                progress(total_prepare.saturating_add(mapped), total_progress);
+            }
+        });
+
+        let bytes = build_ctb_container_bytes_with_progress(
+            job,
+            &prepared,
+            layout_progress.as_ref().map(|cb| cb as &dyn Fn(u32, u32)),
+        )?;
+
+        if let Some(progress) = on_progress {
+            progress(total_progress, total_progress);
+        }
+
+        Ok(bytes)
     }
 
     fn encode_container_from_rendered_layers(

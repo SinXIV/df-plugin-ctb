@@ -2,23 +2,23 @@ use crate::engine::SlicerV3Error;
 use crate::types::SliceJobV3;
 use sha2::{Digest, Sha256};
 
-use super::ctb_types::{
-    CtbBuildModel, CtbExtendedOffsets, CtbPreparedLayer, CtbPreviewOffsets, CtbResinModel,
-    CtbResinPayload, CtbTimingModel, CTB_DISCLAIMER_SIZE, CTB_HEADER_SIZE, CTB_LAYER_DEF_EX_SIZE,
-    CTB_LAYER_DEF_SIZE, CTB_MAGIC_V2_V3, CTB_MAGIC_V4_V5, CTB_MAGIC_V5_ENCRYPTED,
-    CTB_PAGE_SIZE, CTB_PREVIEW_RECORD_SIZE, CTB_PRINT_PARAMETERS_SIZE,
-    CTB_PRINT_PARAMETERS_V4_RESERVED_SIZE, CTB_PRINT_PARAMETERS_V4_SIZE,
-    CTB_SLICER_INFO_FIXED_SIZE,
-};
 use super::ctb_crypto::{
     ctb_encrypt_in_place_no_padding, ctb_encrypt_padded_vec, pad_vec_to_block,
     resolve_ctb_aes_material,
 };
 use super::ctb_metadata::{
     decode_embedded_disclaimer_bytes, parse_ctb_aes_model_from_job, parse_ctb_build_model_from_job,
-    parse_ctb_resin_model_from_job, parse_machine_software_version, parse_timing_model_from_metadata,
+    parse_ctb_resin_model_from_job, parse_machine_software_version,
+    parse_timing_model_from_metadata,
 };
 use super::ctb_preview::{build_previews, write_preview_record};
+use super::ctb_types::{
+    CtbBuildModel, CtbExtendedOffsets, CtbPreparedLayer, CtbPreviewOffsets, CtbResinModel,
+    CtbResinPayload, CtbTimingModel, CTB_DISCLAIMER_SIZE, CTB_HEADER_SIZE, CTB_LAYER_DEF_EX_SIZE,
+    CTB_LAYER_DEF_SIZE, CTB_MAGIC_V2_V3, CTB_MAGIC_V4_V5, CTB_MAGIC_V5_ENCRYPTED, CTB_PAGE_SIZE,
+    CTB_PREVIEW_RECORD_SIZE, CTB_PRINT_PARAMETERS_SIZE, CTB_PRINT_PARAMETERS_V4_RESERVED_SIZE,
+    CTB_PRINT_PARAMETERS_V4_SIZE, CTB_SLICER_INFO_FIXED_SIZE,
+};
 
 fn push_u8(out: &mut Vec<u8>, value: u8) {
     out.push(value);
@@ -62,6 +62,7 @@ fn page_number_and_offset(absolute_offset: u64) -> (u32, u32) {
     (page, offset)
 }
 
+#[cfg(test)]
 pub(super) fn rle_encode_mask_row_major(mask: &[u8]) -> Vec<u8> {
     if mask.is_empty() {
         return Vec::new();
@@ -84,6 +85,46 @@ pub(super) fn rle_encode_mask_row_major(mask: &[u8]) -> Vec<u8> {
 
     push_ctb_run(&mut out, run_len, run_value);
     out
+}
+
+fn rle_encode_thresholded_row_major(mask: &[u8], threshold: u8) -> Vec<u8> {
+    if mask.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(mask.len() / 2);
+    let mut run_value = if mask[0] > threshold { 255 } else { 0 };
+    let mut run_len: u32 = 1;
+
+    for &px in &mask[1..] {
+        let next = if px > threshold { 255 } else { 0 };
+        if next == run_value {
+            run_len = run_len.saturating_add(1);
+            continue;
+        }
+
+        push_ctb_run(&mut out, run_len, run_value);
+        run_value = next;
+        run_len = 1;
+    }
+
+    push_ctb_run(&mut out, run_len, run_value);
+    out
+}
+
+pub(super) fn encode_single_ctb_layer_from_raw_mask(
+    layer_index: usize,
+    raw_mask: &[u8],
+    threshold: u8,
+    layer_xor_key: u32,
+) -> CtbPreparedLayer {
+    let mut encoded = rle_encode_thresholded_row_major(raw_mask, threshold);
+    ctb_layer_rle_xor(layer_xor_key, layer_index as u32, &mut encoded);
+    CtbPreparedLayer {
+        index: layer_index,
+        source_len: raw_mask.len(),
+        encoded,
+    }
 }
 
 pub(super) fn push_ctb_run(out: &mut Vec<u8>, len: u32, value_8bit: u8) {
@@ -126,6 +167,7 @@ pub(super) fn push_ctb_run(out: &mut Vec<u8>, len: u32, value_8bit: u8) {
     out.push(clamped as u8);
 }
 
+#[cfg(test)]
 pub(super) fn normalize_to_binary_mask(mask: &[u8], threshold: u8) -> (Vec<u8>, u32) {
     let mut out = Vec::with_capacity(mask.len());
     let mut lit_pixels: u32 = 0;
@@ -169,20 +211,32 @@ pub(super) fn prepare_layers_for_ctb(
     threshold: u8,
     layer_xor_key: u32,
 ) -> Vec<CtbPreparedLayer> {
-    raw_masks
-        .iter()
-        .enumerate()
-        .map(|(index, layer)| {
-            let (binary, _lit_pixels) = normalize_to_binary_mask(layer, threshold);
-            let mut encoded = rle_encode_mask_row_major(&binary);
-            ctb_layer_rle_xor(layer_xor_key, index as u32, &mut encoded);
-            CtbPreparedLayer {
-                index,
-                source_len: layer.len(),
-                encoded,
-            }
-        })
-        .collect()
+    prepare_layers_for_ctb_with_progress(raw_masks, threshold, layer_xor_key, None)
+}
+
+pub(super) fn prepare_layers_for_ctb_with_progress(
+    raw_masks: &[Vec<u8>],
+    threshold: u8,
+    layer_xor_key: u32,
+    on_progress: Option<&dyn Fn(u32, u32)>,
+) -> Vec<CtbPreparedLayer> {
+    let total = raw_masks.len() as u32;
+    let mut out = Vec::with_capacity(raw_masks.len());
+
+    for (index, layer) in raw_masks.iter().enumerate() {
+        out.push(encode_single_ctb_layer_from_raw_mask(
+            index,
+            layer,
+            threshold,
+            layer_xor_key,
+        ));
+
+        if let Some(progress) = on_progress {
+            progress((index as u32) + 1, total.max(1));
+        }
+    }
+
+    out
 }
 
 fn write_ctb_header(
@@ -268,12 +322,23 @@ fn write_ctb_slicer_info_fixed(
     push_u32(out, machine_name_offset);
     push_u32(out, machine_name_size);
 
-    push_u8(out, if build.anti_alias_level > 1 { 0x0f } else { 0x07 });
+    push_u8(
+        out,
+        if build.anti_alias_level > 1 {
+            0x0f
+        } else {
+            0x07
+        },
+    );
     push_u16(out, 0);
     push_u8(
         out,
         if build.per_layer_settings {
-            if build.version >= 5 { 0x50 } else { 0x40 }
+            if build.version >= 5 {
+                0x50
+            } else {
+                0x40
+            }
         } else {
             0x00
         },
@@ -321,7 +386,11 @@ fn write_ctb_print_parameters_v4(
     out.extend_from_slice(&[0u8; CTB_PRINT_PARAMETERS_V4_RESERVED_SIZE]);
 }
 
-fn prepare_resin_payload(build: &CtbBuildModel, resin: &CtbResinModel, aes_enabled: bool) -> CtbResinPayload {
+fn prepare_resin_payload(
+    build: &CtbBuildModel,
+    resin: &CtbResinModel,
+    aes_enabled: bool,
+) -> CtbResinPayload {
     let mut machine_name_bytes = build.machine_name.as_bytes().to_vec();
     let mut resin_type_bytes = resin.resin_type.as_bytes().to_vec();
     let mut resin_name_bytes = resin.resin_name.as_bytes().to_vec();
@@ -338,8 +407,13 @@ fn prepare_resin_payload(build: &CtbBuildModel, resin: &CtbResinModel, aes_enabl
         }
     }
 
-    let base_len = 40usize + resin_type_bytes.len() + resin_name_bytes.len() + machine_name_bytes.len();
-    let tail_padding_bytes = if aes_enabled { (16 - (base_len % 16)) % 16 } else { 0 };
+    let base_len =
+        40usize + resin_type_bytes.len() + resin_name_bytes.len() + machine_name_bytes.len();
+    let tail_padding_bytes = if aes_enabled {
+        (16 - (base_len % 16)) % 16
+    } else {
+        0
+    };
 
     CtbResinPayload {
         machine_name_bytes,
@@ -460,6 +534,14 @@ pub(super) fn build_ctb_container_bytes(
     job: &SliceJobV3,
     prepared: &[CtbPreparedLayer],
 ) -> Result<Vec<u8>, SlicerV3Error> {
+    build_ctb_container_bytes_with_progress(job, prepared, None)
+}
+
+pub(super) fn build_ctb_container_bytes_with_progress(
+    job: &SliceJobV3,
+    prepared: &[CtbPreparedLayer],
+    on_progress: Option<&dyn Fn(u32, u32)>,
+) -> Result<Vec<u8>, SlicerV3Error> {
     let timing = parse_timing_model_from_metadata(&job.metadata_json);
     let build = parse_ctb_build_model_from_job(job);
     let resin = parse_ctb_resin_model_from_job(job, &build.machine_name);
@@ -539,7 +621,8 @@ pub(super) fn build_ctb_container_bytes(
     let layer_defs_total_size = layer_count as u64 * CTB_LAYER_DEF_SIZE as u64;
     let mut rolling_data_abs = layers_definition_offset as u64 + layer_defs_total_size;
 
-    for layer in prepared {
+    let layer_total = prepared.len() as u32;
+    for (layer_step, layer) in prepared.iter().enumerate() {
         let position_z = (layer.index as f32 + 1.0) * job.layer_height_mm;
         let is_bottom = (layer.index as u32) < timing.bottom_layer_count;
         let exposure = if is_bottom {
@@ -560,7 +643,14 @@ pub(super) fn build_ctb_container_bytes(
         };
 
         let mut one_def = Vec::with_capacity(CTB_LAYER_DEF_SIZE as usize);
-        write_layer_def(&mut one_def, layer, position_z, exposure, light_off, data_abs);
+        write_layer_def(
+            &mut one_def,
+            layer,
+            position_z,
+            exposure,
+            light_off,
+            data_abs,
+        );
         layer_defs_data.extend_from_slice(&one_def);
 
         if build.version >= 3 {
@@ -572,6 +662,10 @@ pub(super) fn build_ctb_container_bytes(
 
         layer_ex_and_payload.extend_from_slice(&layer.encoded);
         rolling_data_abs = rolling_data_abs.saturating_add(layer.encoded.len() as u64);
+
+        if let Some(progress) = on_progress {
+            progress((layer_step as u32) + 1, layer_total.max(1));
+        }
     }
 
     let mut out = Vec::with_capacity(rolling_data_abs as usize + 2048);
