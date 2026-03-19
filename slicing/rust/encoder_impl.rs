@@ -1,6 +1,7 @@
 use crate::encoders::FormatEncoder;
 use crate::engine::SlicerV3Error;
 use crate::types::{LayerAreaStatsV3, RenderedLayersV3, SliceJobV3};
+use serde_json::Value;
 use std::path::Path;
 
 pub struct CtbPluginEncoder;
@@ -9,30 +10,99 @@ pub fn create_plugin_encoder() -> Vec<Box<dyn FormatEncoder>> {
     vec![Box::new(CtbPluginEncoder)]
 }
 
+const DEFAULT_BINARY_THRESHOLD: u8 = 127;
+
+#[derive(Debug, Clone)]
+struct CtbPreparedLayer {
+    index: usize,
+    source_len: usize,
+    encoded: Vec<u8>,
+    lit_pixels: u32,
+}
+
 fn rle_encode_mask_row_major(mask: &[u8]) -> Vec<u8> {
     if mask.is_empty() {
         return Vec::new();
     }
 
-    let mut out = Vec::with_capacity(mask.len() / 2);
+    // Run packet: [run_len_le_u16, run_value_u8].
+    // A 16-bit run length avoids pathological expansion on large uniform spans.
+    let mut out = Vec::with_capacity(mask.len() / 3);
     let mut run_value = mask[0];
-    let mut run_len: u8 = 1;
+    let mut run_len: u16 = 1;
 
     for &px in &mask[1..] {
-        if px == run_value && run_len < u8::MAX {
+        if px == run_value && run_len < u16::MAX {
             run_len = run_len.saturating_add(1);
             continue;
         }
 
-        out.push(run_len);
+        out.extend_from_slice(&run_len.to_le_bytes());
         out.push(run_value);
         run_value = px;
         run_len = 1;
     }
 
-    out.push(run_len);
+    out.extend_from_slice(&run_len.to_le_bytes());
     out.push(run_value);
     out
+}
+
+fn normalize_to_binary_mask(mask: &[u8], threshold: u8) -> (Vec<u8>, u32) {
+    let mut out = Vec::with_capacity(mask.len());
+    let mut lit_pixels: u32 = 0;
+
+    for &px in mask {
+        let bin = if px > threshold { 255 } else { 0 };
+        if bin == 255 {
+            lit_pixels = lit_pixels.saturating_add(1);
+        }
+        out.push(bin);
+    }
+
+    (out, lit_pixels)
+}
+
+fn parse_threshold_from_metadata(metadata_json: &str) -> u8 {
+    let Ok(meta) = serde_json::from_str::<Value>(metadata_json) else {
+        return DEFAULT_BINARY_THRESHOLD;
+    };
+
+    // Preferred knobs (kept narrow and explicit to avoid accidental collisions):
+    // - metadata.ctb.binaryThreshold
+    // - metadata.export.ctb.binaryThreshold
+    let direct = meta
+        .get("ctb")
+        .and_then(|v| v.get("binaryThreshold"))
+        .and_then(Value::as_u64);
+
+    let nested = meta
+        .get("export")
+        .and_then(|v| v.get("ctb"))
+        .and_then(|v| v.get("binaryThreshold"))
+        .and_then(Value::as_u64);
+
+    direct
+        .or(nested)
+        .map(|v| v.min(255) as u8)
+        .unwrap_or(DEFAULT_BINARY_THRESHOLD)
+}
+
+fn prepare_layers_for_ctb(raw_masks: &[Vec<u8>], threshold: u8) -> Vec<CtbPreparedLayer> {
+    raw_masks
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let (binary, lit_pixels) = normalize_to_binary_mask(layer, threshold);
+            let encoded = rle_encode_mask_row_major(&binary);
+            CtbPreparedLayer {
+                index,
+                source_len: layer.len(),
+                encoded,
+                lit_pixels,
+            }
+        })
+        .collect()
 }
 
 impl FormatEncoder for CtbPluginEncoder {
@@ -50,7 +120,7 @@ impl FormatEncoder for CtbPluginEncoder {
 
     fn encode_container_from_rendered_layers(
         &self,
-        _job: &SliceJobV3,
+        job: &SliceJobV3,
         rendered_layers: &RenderedLayersV3,
         _layer_area_stats: &[LayerAreaStatsV3],
     ) -> Result<Vec<u8>, SlicerV3Error> {
@@ -60,15 +130,39 @@ impl FormatEncoder for CtbPluginEncoder {
             ));
         };
 
-        // Phase 1 implementation: exercise and validate the raw-layer + RLE path.
-        // Final CTB container serialization will be added in follow-up commits.
-        let _rle_layers: Vec<Vec<u8>> = raw_masks
-            .iter()
-            .map(|layer| rle_encode_mask_row_major(layer))
-            .collect();
+        if raw_masks.is_empty() {
+            return Err(SlicerV3Error::MissingRenderedLayerPayload(
+                "no rendered layers were provided for CTB encoding".to_string(),
+            ));
+        }
+
+        let expected_pixels = (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
+        for (idx, layer) in raw_masks.iter().enumerate() {
+            if layer.len() != expected_pixels {
+                return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
+                    "CTB layer {idx} size mismatch: expected {expected_pixels} bytes, got {}",
+                    layer.len()
+                )));
+            }
+        }
+
+        let threshold = parse_threshold_from_metadata(&job.metadata_json);
+        let prepared = prepare_layers_for_ctb(raw_masks, threshold);
+
+        let encoded_bytes: usize = prepared.iter().map(|l| l.encoded.len()).sum();
+        let source_bytes: usize = prepared.iter().map(|l| l.source_len).sum();
+        let lit_pixels: u64 = prepared.iter().map(|l| l.lit_pixels as u64).sum();
+        let _max_layer_index = prepared.last().map(|l| l.index).unwrap_or(0);
 
         Err(SlicerV3Error::UnsupportedOutput(
-            "CTB container serialization is not implemented yet".to_string(),
+            format!(
+                "CTB container serialization is not implemented yet (prepared {} layer(s), {} -> {} bytes RLE, lit pixels: {}, threshold: {})",
+                prepared.len(),
+                source_bytes,
+                encoded_bytes,
+                lit_pixels,
+                threshold,
+            ),
         ))
     }
 
@@ -82,5 +176,47 @@ impl FormatEncoder for CtbPluginEncoder {
         let bytes = self.encode_container_from_rendered_layers(job, rendered_layers, layer_area_stats)?;
         std::fs::write(output_path, bytes)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_to_binary_mask, parse_threshold_from_metadata, rle_encode_mask_row_major};
+
+    #[test]
+    fn binary_mask_thresholds_values() {
+        let (masked, lit) = normalize_to_binary_mask(&[0, 12, 127, 128, 255], 127);
+        assert_eq!(masked, vec![0, 0, 0, 255, 255]);
+        assert_eq!(lit, 2);
+    }
+
+    #[test]
+    fn rle_encodes_simple_runs() {
+        // Runs: 2x0, 3x255, 1x0
+        let encoded = rle_encode_mask_row_major(&[0, 0, 255, 255, 255, 0]);
+        assert_eq!(encoded, vec![2, 0, 0, 3, 0, 255, 1, 0, 0]);
+    }
+
+    #[test]
+    fn rle_handles_long_runs_above_u8() {
+        let input = vec![255u8; 300];
+        let encoded = rle_encode_mask_row_major(&input);
+        // One run, length=300 => 0x012C (little-endian [44,1]), value=255
+        assert_eq!(encoded, vec![44, 1, 255]);
+    }
+
+    #[test]
+    fn metadata_threshold_defaults_when_missing_or_invalid() {
+        assert_eq!(parse_threshold_from_metadata("{}"), 127);
+        assert_eq!(parse_threshold_from_metadata("not-json"), 127);
+    }
+
+    #[test]
+    fn metadata_threshold_reads_supported_paths() {
+        let direct = r#"{ "ctb": { "binaryThreshold": 180 } }"#;
+        let nested = r#"{ "export": { "ctb": { "binaryThreshold": 200 } } }"#;
+
+        assert_eq!(parse_threshold_from_metadata(direct), 180);
+        assert_eq!(parse_threshold_from_metadata(nested), 200);
     }
 }
