@@ -8,5 +8,5 @@ export const CTB_FORMAT_DEFINITION: SlicingFormatDefinition = {
   pluginId: 'ctb',
   rustModulePath: 'formats::ctb',
   wasmExportName: 'encode_ctb_container',
-  notes: 'CTB encoder in progress. Uses raw raster mask layers (RLE prep path) in dragonfruit-slicer-v3.',
+  notes: 'CTB binary encoder using raw raster mask layers in dragonfruit-slicer-v3.',
 };

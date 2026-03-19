@@ -1,8 +1,24 @@
+mod ctb_crypto;
+mod ctb_layout;
+mod ctb_metadata;
+mod ctb_preview;
+mod ctb_types;
+
 use crate::encoders::FormatEncoder;
 use crate::engine::SlicerV3Error;
 use crate::types::{LayerAreaStatsV3, RenderedLayersV3, SliceJobV3};
-use serde_json::{json, Value};
+use ctb_layout::{build_ctb_container_bytes, prepare_layers_for_ctb};
+use ctb_metadata::{parse_ctb_build_model_from_job, parse_threshold_from_metadata};
 use std::path::Path;
+
+#[cfg(test)]
+use ctb_layout::{
+    ctb_layer_rle_xor, normalize_to_binary_mask, push_ctb_run, rle_encode_mask_row_major,
+};
+#[cfg(test)]
+use ctb_metadata::decode_embedded_disclaimer_bytes;
+#[cfg(test)]
+use ctb_types::{CtbPreparedLayer, CTB_DISCLAIMER_SIZE, CTB_HEADER_SIZE};
 
 pub struct CtbPluginEncoder;
 
@@ -10,374 +26,7 @@ pub fn create_plugin_encoder() -> Vec<Box<dyn FormatEncoder>> {
     vec![Box::new(CtbPluginEncoder)]
 }
 
-const DEFAULT_BINARY_THRESHOLD: u8 = 127;
-const CTB_DRAFT_MAGIC: &[u8; 8] = b"DFCTBDR1";
-const CTB_DRAFT_VERSION: u32 = 2;
-const CTB_DRAFT_HEADER_SIZE: u32 = 80;
-const CTB_DRAFT_SECTION_ENTRY_SIZE: u32 = 20;
-const SECTION_ID_META: [u8; 4] = *b"META";
-const SECTION_ID_LUT0: [u8; 4] = *b"LUT0";
-const SECTION_ID_LAYR: [u8; 4] = *b"LAYR";
-
-#[derive(Debug, Clone)]
-struct CtbPreparedLayer {
-    index: usize,
-    source_len: usize,
-    encoded: Vec<u8>,
-    lit_pixels: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CtbTimingModel {
-    normal_exposure_sec: f32,
-    bottom_exposure_sec: f32,
-    bottom_layer_count: u32,
-    lift_distance_mm: f32,
-    lift_speed_mm_min: f32,
-    retract_speed_mm_min: f32,
-}
-
-#[derive(Debug, Clone)]
-struct DraftSection {
-    id: [u8; 4],
-    bytes: Vec<u8>,
-}
-
-fn rle_encode_mask_row_major(mask: &[u8]) -> Vec<u8> {
-    if mask.is_empty() {
-        return Vec::new();
-    }
-
-    // CTB-style run format (clean-room behavior mapping):
-    // - First byte stores 7-bit grayscale value (value >> 1).
-    // - High bit indicates whether a run-length field follows.
-    // - Run-length field uses variable-length prefixes for larger spans.
-    //
-    // For binary masks (0 / 255), this maps to values 0x00 and 0x7f.
-    let mut out = Vec::with_capacity(mask.len() / 2);
-    let mut run_value = mask[0];
-    let mut run_len: u32 = 1;
-
-    for &px in &mask[1..] {
-        if px == run_value {
-            run_len = run_len.saturating_add(1);
-            continue;
-        }
-
-        push_ctb_style_run(&mut out, run_len, run_value);
-        run_value = px;
-        run_len = 1;
-    }
-
-    push_ctb_style_run(&mut out, run_len, run_value);
-    out
-}
-
-fn push_ctb_style_run(out: &mut Vec<u8>, len: u32, value_8bit: u8) {
-    if len == 0 {
-        return;
-    }
-
-    let mut code = value_8bit >> 1; // 8-bit grayscale -> 7-bit storage
-    if len > 1 {
-        code |= 0x80;
-    }
-    out.push(code);
-
-    if len <= 1 {
-        return;
-    }
-
-    if len <= 0x7f {
-        out.push(len as u8);
-        return;
-    }
-
-    if len <= 0x3fff {
-        out.push(((len >> 8) as u8) | 0x80);
-        out.push(len as u8);
-        return;
-    }
-
-    if len <= 0x1f_ffff {
-        out.push(((len >> 16) as u8) | 0xc0);
-        out.push((len >> 8) as u8);
-        out.push(len as u8);
-        return;
-    }
-
-    // Highest currently-supported span envelope in known CTB family layouts.
-    let clamped = len.min(0x0fff_ffff);
-    out.push(((clamped >> 24) as u8) | 0xe0);
-    out.push((clamped >> 16) as u8);
-    out.push((clamped >> 8) as u8);
-    out.push(clamped as u8);
-}
-
-fn normalize_to_binary_mask(mask: &[u8], threshold: u8) -> (Vec<u8>, u32) {
-    let mut out = Vec::with_capacity(mask.len());
-    let mut lit_pixels: u32 = 0;
-
-    for &px in mask {
-        let bin = if px > threshold { 255 } else { 0 };
-        if bin == 255 {
-            lit_pixels = lit_pixels.saturating_add(1);
-        }
-        out.push(bin);
-    }
-
-    (out, lit_pixels)
-}
-
-fn parse_threshold_from_metadata(metadata_json: &str) -> u8 {
-    let Ok(meta) = serde_json::from_str::<Value>(metadata_json) else {
-        return DEFAULT_BINARY_THRESHOLD;
-    };
-
-    // Preferred knobs (kept narrow and explicit to avoid accidental collisions):
-    // - metadata.ctb.binaryThreshold
-    // - metadata.export.ctb.binaryThreshold
-    let direct = meta
-        .get("ctb")
-        .and_then(|v| v.get("binaryThreshold"))
-        .and_then(Value::as_u64);
-
-    let nested = meta
-        .get("export")
-        .and_then(|v| v.get("ctb"))
-        .and_then(|v| v.get("binaryThreshold"))
-        .and_then(Value::as_u64);
-
-    direct
-        .or(nested)
-        .map(|v| v.min(255) as u8)
-        .unwrap_or(DEFAULT_BINARY_THRESHOLD)
-}
-
-fn parse_experimental_serialize_from_metadata(metadata_json: &str) -> bool {
-    let Ok(meta) = serde_json::from_str::<Value>(metadata_json) else {
-        return false;
-    };
-
-    let direct = meta
-        .get("ctb")
-        .and_then(|v| v.get("experimentalSerialize"))
-        .and_then(Value::as_bool);
-
-    let nested = meta
-        .get("export")
-        .and_then(|v| v.get("ctb"))
-        .and_then(|v| v.get("experimentalSerialize"))
-        .and_then(Value::as_bool);
-
-    direct.or(nested).unwrap_or(false)
-}
-
-fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTimingModel {
-    let Ok(meta) = serde_json::from_str::<Value>(metadata_json) else {
-        return CtbTimingModel {
-            normal_exposure_sec: 0.0,
-            bottom_exposure_sec: 0.0,
-            bottom_layer_count: 0,
-            lift_distance_mm: 0.0,
-            lift_speed_mm_min: 0.0,
-            retract_speed_mm_min: 0.0,
-        };
-    };
-
-    let material = meta.get("material").and_then(Value::as_object);
-    let read_f32 = |key: &str| {
-        material
-            .and_then(|m| m.get(key))
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0) as f32
-    };
-    let bottom_layer_count = material
-        .and_then(|m| m.get("bottomLayerCount"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as u32;
-
-    CtbTimingModel {
-        normal_exposure_sec: read_f32("normalExposureSec"),
-        bottom_exposure_sec: read_f32("bottomExposureSec"),
-        bottom_layer_count,
-        lift_distance_mm: read_f32("liftDistanceMm"),
-        lift_speed_mm_min: read_f32("liftSpeedMmMin"),
-        retract_speed_mm_min: read_f32("retractSpeedMmMin"),
-    }
-}
-
-fn prepare_layers_for_ctb(raw_masks: &[Vec<u8>], threshold: u8) -> Vec<CtbPreparedLayer> {
-    raw_masks
-        .iter()
-        .enumerate()
-        .map(|(index, layer)| {
-            let (binary, lit_pixels) = normalize_to_binary_mask(layer, threshold);
-            let encoded = rle_encode_mask_row_major(&binary);
-            CtbPreparedLayer {
-                index,
-                source_len: layer.len(),
-                encoded,
-                lit_pixels,
-            }
-        })
-        .collect()
-}
-
-fn push_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_f32(out: &mut Vec<u8>, value: f32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_section_entry(out: &mut Vec<u8>, section_id: [u8; 4], offset: u64, size: u64) {
-    out.extend_from_slice(&section_id);
-    push_u64(out, offset);
-    push_u64(out, size);
-}
-
-fn build_layer_table_section(prepared: &[CtbPreparedLayer]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(prepared.len() * 24);
-    let mut encoded_offset: u64 = 0;
-
-    for layer in prepared {
-        push_u32(&mut out, layer.index as u32);
-        push_u32(&mut out, layer.source_len as u32);
-        push_u32(&mut out, layer.lit_pixels);
-        push_u32(&mut out, layer.encoded.len() as u32);
-        push_u64(&mut out, encoded_offset);
-        encoded_offset = encoded_offset.saturating_add(layer.encoded.len() as u64);
-    }
-
-    out
-}
-
-fn build_metadata_section(
-    job: &SliceJobV3,
-    prepared: &[CtbPreparedLayer],
-    threshold: u8,
-    timing: CtbTimingModel,
-) -> Result<Vec<u8>, SlicerV3Error> {
-    let source_bytes: u64 = prepared.iter().map(|l| l.source_len as u64).sum();
-    let encoded_bytes: u64 = prepared.iter().map(|l| l.encoded.len() as u64).sum();
-    let lit_pixels: u64 = prepared.iter().map(|l| l.lit_pixels as u64).sum();
-
-    let metadata = json!({
-        "container": {
-            "kind": "ctb-draft",
-            "version": CTB_DRAFT_VERSION,
-            "experimental": true,
-        },
-        "raster": {
-            "widthPx": job.source_width_px,
-            "heightPx": job.source_height_px,
-            "layers": prepared.len(),
-            "binaryThreshold": threshold,
-            "sourceBytes": source_bytes,
-            "encodedBytes": encoded_bytes,
-            "litPixels": lit_pixels,
-        },
-        "timing": {
-            "normalExposureSec": timing.normal_exposure_sec,
-            "bottomExposureSec": timing.bottom_exposure_sec,
-            "bottomLayerCount": timing.bottom_layer_count,
-            "liftDistanceMm": timing.lift_distance_mm,
-            "liftSpeedMmMin": timing.lift_speed_mm_min,
-            "retractSpeedMmMin": timing.retract_speed_mm_min,
-        },
-        "build": {
-            "buildWidthMm": job.build_width_mm,
-            "buildDepthMm": job.build_depth_mm,
-            "layerHeightMm": job.layer_height_mm,
-            "mirrorX": job.mirror_x,
-            "mirrorY": job.mirror_y,
-            "antiAliasingLevel": job.anti_aliasing_level,
-        }
-    });
-
-    Ok(serde_json::to_vec(&metadata)?)
-}
-
-fn build_experimental_container_bytes(
-    job: &SliceJobV3,
-    prepared: &[CtbPreparedLayer],
-    threshold: u8,
-) -> Result<Vec<u8>, SlicerV3Error> {
-    let timing = parse_timing_model_from_metadata(&job.metadata_json);
-    let section_meta = DraftSection {
-        id: SECTION_ID_META,
-        bytes: build_metadata_section(job, prepared, threshold, timing)?,
-    };
-    let section_lut = DraftSection {
-        id: SECTION_ID_LUT0,
-        bytes: build_layer_table_section(prepared),
-    };
-    let section_layers = DraftSection {
-        id: SECTION_ID_LAYR,
-        bytes: prepared
-            .iter()
-            .flat_map(|l| l.encoded.iter().copied())
-            .collect(),
-    };
-
-    let sections = vec![section_meta, section_lut, section_layers];
-    let section_count = sections.len() as u32;
-    let section_table_size = section_count.saturating_mul(CTB_DRAFT_SECTION_ENTRY_SIZE);
-    let section_table_offset = CTB_DRAFT_HEADER_SIZE as u64;
-    let payload_offset = section_table_offset.saturating_add(section_table_size as u64);
-
-    let payload_size: u64 = sections.iter().map(|s| s.bytes.len() as u64).sum();
-    let total_size = payload_offset.saturating_add(payload_size);
-
-    let mut out = Vec::with_capacity(total_size as usize);
-
-    // Header (80 bytes)
-    out.extend_from_slice(CTB_DRAFT_MAGIC); // 8
-    push_u32(&mut out, CTB_DRAFT_VERSION); // 12
-    push_u32(&mut out, CTB_DRAFT_HEADER_SIZE); // 16
-    push_u32(&mut out, job.source_width_px); // 20
-    push_u32(&mut out, job.source_height_px); // 24
-    push_u32(&mut out, prepared.len() as u32); // 28
-    out.push(threshold); // 29
-    out.extend_from_slice(&[0, 0, 0]); // 32 reserved
-    push_f32(&mut out, job.layer_height_mm); // 36
-    push_f32(&mut out, job.build_width_mm); // 40
-    push_f32(&mut out, job.build_depth_mm); // 44
-    push_u32(&mut out, section_count); // 48
-    push_u64(&mut out, section_table_offset); // 56
-    push_u64(&mut out, payload_offset); // 64
-    push_u64(&mut out, total_size); // 72
-    push_u64(&mut out, 0); // 80 reserved
-
-    // Section table + payload
-    let mut running_payload_offset = payload_offset;
-    for section in &sections {
-        push_section_entry(
-            &mut out,
-            section.id,
-            running_payload_offset,
-            section.bytes.len() as u64,
-        );
-        running_payload_offset = running_payload_offset.saturating_add(section.bytes.len() as u64);
-    }
-    for section in sections {
-        out.extend_from_slice(&section.bytes);
-    }
-
-    if out.is_empty() {
-        return Err(SlicerV3Error::UnsupportedOutput(
-            "failed to build experimental CTB container bytes".to_string(),
-        ));
-    }
-
-    Ok(out)
-}
+// Parsing and layout logic live in `ctb_metadata.rs` and `ctb_layout.rs`.
 
 impl FormatEncoder for CtbPluginEncoder {
     fn output_format(&self) -> &'static str {
@@ -410,7 +59,8 @@ impl FormatEncoder for CtbPluginEncoder {
             ));
         }
 
-        let expected_pixels = (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
+        let expected_pixels =
+            (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
         for (idx, layer) in raw_masks.iter().enumerate() {
             if layer.len() != expected_pixels {
                 return Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
@@ -421,27 +71,18 @@ impl FormatEncoder for CtbPluginEncoder {
         }
 
         let threshold = parse_threshold_from_metadata(&job.metadata_json);
-        let prepared = prepare_layers_for_ctb(raw_masks, threshold);
+        let build = parse_ctb_build_model_from_job(job);
+        let prepared = prepare_layers_for_ctb(raw_masks, threshold, build.layer_xor_key);
 
-        let encoded_bytes: usize = prepared.iter().map(|l| l.encoded.len()).sum();
         let source_bytes: usize = prepared.iter().map(|l| l.source_len).sum();
-        let lit_pixels: u64 = prepared.iter().map(|l| l.lit_pixels as u64).sum();
-        let experimental_serialize = parse_experimental_serialize_from_metadata(&job.metadata_json);
-
-        if experimental_serialize {
-            return build_experimental_container_bytes(job, &prepared, threshold);
+        let encoded_bytes: usize = prepared.iter().map(|l| l.encoded.len()).sum();
+        if encoded_bytes == 0 {
+            return Err(SlicerV3Error::UnsupportedOutput(format!(
+                "CTB encoding produced empty payload (source bytes: {source_bytes})"
+            )));
         }
 
-        Err(SlicerV3Error::UnsupportedOutput(
-            format!(
-                "CTB container serialization is not implemented yet (prepared {} layer(s), {} -> {} bytes RLE, lit pixels: {}, threshold: {}). To emit the experimental binary container for validation, set metadata.ctb.experimentalSerialize=true",
-                prepared.len(),
-                source_bytes,
-                encoded_bytes,
-                lit_pixels,
-                threshold,
-            ),
-        ))
+        build_ctb_container_bytes(job, &prepared)
     }
 
     fn encode_container_to_path(
@@ -451,7 +92,8 @@ impl FormatEncoder for CtbPluginEncoder {
         layer_area_stats: &[LayerAreaStatsV3],
         output_path: &Path,
     ) -> Result<(), SlicerV3Error> {
-        let bytes = self.encode_container_from_rendered_layers(job, rendered_layers, layer_area_stats)?;
+        let bytes =
+            self.encode_container_from_rendered_layers(job, rendered_layers, layer_area_stats)?;
         std::fs::write(output_path, bytes)?;
         Ok(())
     }
@@ -460,10 +102,10 @@ impl FormatEncoder for CtbPluginEncoder {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_experimental_container_bytes, normalize_to_binary_mask,
-        parse_experimental_serialize_from_metadata, parse_threshold_from_metadata,
-        push_ctb_style_run, rle_encode_mask_row_major, CtbPreparedLayer, CTB_DRAFT_MAGIC,
-        CTB_DRAFT_HEADER_SIZE, SECTION_ID_LAYR, SECTION_ID_LUT0, SECTION_ID_META,
+        build_ctb_container_bytes, ctb_layer_rle_xor, ctb_preview,
+        decode_embedded_disclaimer_bytes, normalize_to_binary_mask, parse_threshold_from_metadata,
+        push_ctb_run, rle_encode_mask_row_major, CtbPreparedLayer, CTB_DISCLAIMER_SIZE,
+        CTB_HEADER_SIZE,
     };
     use crate::types::SliceJobV3;
 
@@ -499,7 +141,6 @@ mod tests {
 
     #[test]
     fn rle_encodes_simple_runs() {
-        // Runs: 2x0, 3x255, 1x0 in CTB-style packetization.
         let encoded = rle_encode_mask_row_major(&[0, 0, 255, 255, 255, 0]);
         assert_eq!(encoded, vec![0x80, 0x02, 0xff, 0x03, 0x00]);
     }
@@ -508,16 +149,14 @@ mod tests {
     fn rle_handles_long_runs_above_u8() {
         let input = vec![255u8; 300];
         let encoded = rle_encode_mask_row_major(&input);
-        // One run, length=300 => 0x012C with 0x80-prefixed 2-byte run length.
         assert_eq!(encoded, vec![0xff, 0x81, 0x2c]);
     }
 
     #[test]
     fn ctb_run_encoder_supports_4byte_span_prefix() {
         let mut out = Vec::new();
-        push_ctb_style_run(&mut out, 0x2A_BC_DE_u32, 255);
+        push_ctb_run(&mut out, 0x2A_BC_DE_u32, 255);
 
-        // code(255>>1) with run-flag + 4-byte run prefix.
         assert_eq!(out[0], 0xff);
         assert_eq!(out[1] & 0xE0, 0xE0);
         assert_eq!(out.len(), 5);
@@ -539,70 +178,220 @@ mod tests {
     }
 
     #[test]
-    fn experimental_serialize_flag_reads_supported_paths() {
-        let direct = r#"{ "ctb": { "experimentalSerialize": true } }"#;
-        let nested = r#"{ "export": { "ctb": { "experimentalSerialize": true } } }"#;
-        let no_flag = r#"{ "ctb": { "binaryThreshold": 123 } }"#;
+    fn layer_xor_roundtrip_restores_original() {
+        let seed = 0x1234_5678;
+        let layer_index = 7;
+        let original = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 255];
 
-        assert!(parse_experimental_serialize_from_metadata(direct));
-        assert!(parse_experimental_serialize_from_metadata(nested));
-        assert!(!parse_experimental_serialize_from_metadata(no_flag));
+        let mut encrypted = original.clone();
+        ctb_layer_rle_xor(seed, layer_index, &mut encrypted);
+        assert_ne!(encrypted, original);
+
+        ctb_layer_rle_xor(seed, layer_index, &mut encrypted);
+        assert_eq!(encrypted, original);
     }
 
     #[test]
-    fn experimental_container_has_expected_header_and_magic() {
-        let job = make_test_job();
+    fn preview_rle_encodes_non_empty() {
+        let rgb = vec![255u8, 0, 0, 255, 0, 0, 0, 0, 255];
+        let rle = ctb_preview::encode_preview_rgb15_rle(&rgb);
+        assert!(!rle.is_empty());
+    }
+
+    #[test]
+    fn data_url_or_plain_base64_decode_works() {
+        let tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlH0wAAAABJRU5ErkJggg==";
+        let data_url = format!("data:image/png;base64,{tiny_png}");
+
+        let a =
+            ctb_preview::decode_base64_data_url_or_plain(tiny_png).expect("plain should decode");
+        let b = ctb_preview::decode_base64_data_url_or_plain(&data_url)
+            .expect("data-url should decode");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn embedded_disclaimer_decodes_without_plaintext_constant() {
+        let bytes = decode_embedded_disclaimer_bytes().expect("embedded disclaimer should decode");
+        assert!(!bytes.is_empty());
+        assert!(bytes.len() <= CTB_DISCLAIMER_SIZE);
+    }
+
+    #[test]
+    fn ctb_container_writes_magic_and_header_fields() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{ "ctb": { "version": 4 } }"#.to_string();
         let prepared = vec![
             CtbPreparedLayer {
                 index: 0,
                 source_len: 16,
                 encoded: vec![2, 0, 255],
-                lit_pixels: 1,
             },
             CtbPreparedLayer {
                 index: 1,
                 source_len: 16,
                 encoded: vec![1, 0, 0],
-                lit_pixels: 0,
             },
         ];
 
-        let bytes = build_experimental_container_bytes(&job, &prepared, 127).expect("container should build");
-        assert!(bytes.len() > 64);
-        assert_eq!(&bytes[0..8], CTB_DRAFT_MAGIC);
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
+        assert!(bytes.len() > CTB_HEADER_SIZE as usize);
 
-        // header offsets:
-        // 0..8 magic
-        // 8..12 version
-        // 16..20 width
-        // 20..24 height
-        // 24..28 layer_count
-        let width = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
-        let height = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
-        let layers = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let width = u32::from_le_bytes(bytes[52..56].try_into().unwrap());
+        let height = u32::from_le_bytes(bytes[56..60].try_into().unwrap());
+        let layers = u32::from_le_bytes(bytes[68..72].try_into().unwrap());
+
+        assert_eq!(magic, 0x12FD_0106);
+        assert_eq!(version, 4);
         assert_eq!(width, 4);
         assert_eq!(height, 4);
         assert_eq!(layers, 2);
     }
 
     #[test]
-    fn experimental_container_writes_expected_section_ids() {
+    fn ctb_container_embeds_preview_offsets() {
         let job = make_test_job();
         let prepared = vec![CtbPreparedLayer {
             index: 0,
             source_len: 16,
             encoded: vec![2, 0, 255],
-            lit_pixels: 1,
         }];
 
-        let bytes = build_experimental_container_bytes(&job, &prepared, 127).expect("container should build");
-        let table_offset = CTB_DRAFT_HEADER_SIZE as usize;
-        let first = &bytes[table_offset..table_offset + 4];
-        let second = &bytes[table_offset + 20..table_offset + 24];
-        let third = &bytes[table_offset + 40..table_offset + 44];
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
+        let large_preview_offset = u32::from_le_bytes(bytes[60..64].try_into().unwrap());
+        let small_preview_offset = u32::from_le_bytes(bytes[72..76].try_into().unwrap());
 
-        assert_eq!(first, SECTION_ID_META);
-        assert_eq!(second, SECTION_ID_LUT0);
-        assert_eq!(third, SECTION_ID_LAYR);
+        assert!(large_preview_offset >= CTB_HEADER_SIZE);
+        assert!(small_preview_offset > large_preview_offset);
+    }
+
+    #[test]
+    fn ctb_v4_writes_disclaimer_and_print_params_v4() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{ "ctb": { "version": 4 } }"#.to_string();
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
+
+        let slicer_offset = u32::from_le_bytes(bytes[104..108].try_into().unwrap()) as usize;
+        let print_params_v4_addr = u32::from_le_bytes(
+            bytes[slicer_offset + 64..slicer_offset + 68]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert!(print_params_v4_addr > slicer_offset);
+
+        let disclaimer_addr = u32::from_le_bytes(
+            bytes[print_params_v4_addr + 72..print_params_v4_addr + 76]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let disclaimer_len = u32::from_le_bytes(
+            bytes[print_params_v4_addr + 76..print_params_v4_addr + 80]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        assert_eq!(disclaimer_len, CTB_DISCLAIMER_SIZE);
+        assert!(disclaimer_addr + disclaimer_len <= bytes.len());
+    }
+
+    #[test]
+    fn ctb_v5_writes_resin_parameters_address() {
+        let mut job = make_test_job();
+        job.metadata_json =
+            r#"{ "ctb": { "version": 5, "resinName": "FastResin", "resinType": "ABS-Like" } }"#
+                .to_string();
+
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
+
+        let slicer_offset = u32::from_le_bytes(bytes[104..108].try_into().unwrap()) as usize;
+        let print_params_v4_addr = u32::from_le_bytes(
+            bytes[slicer_offset + 64..slicer_offset + 68]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let resin_addr = u32::from_le_bytes(
+            bytes[print_params_v4_addr + 80..print_params_v4_addr + 84]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        assert!(resin_addr > print_params_v4_addr);
+        assert!(resin_addr < bytes.len());
+    }
+
+    #[test]
+    fn ctb_aes_mode_writes_encrypted_magic_and_signature_trailer() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{
+            "ctb": {
+                "version": 5,
+                "aes": {
+                    "enabled": true
+                }
+            }
+        }"#
+        .to_string();
+
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("aes mode should build");
+
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(magic, 0x12FD_0107);
+
+        assert!(bytes.len() > 12);
+        let tail = &bytes[bytes.len() - 4..];
+        let trailer = u32::from_le_bytes(tail.try_into().unwrap());
+        assert_eq!(trailer, 0x6D42_32B3);
+
+        let marker_pos = bytes
+            .windows(4)
+            .position(|w| w == 0x4220_52FAu32.to_le_bytes())
+            .expect("signature marker should exist");
+        assert!(marker_pos > CTB_HEADER_SIZE as usize);
+    }
+
+    #[test]
+    fn ctb_aes_mode_rejects_invalid_key_or_iv_lengths() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{
+            "ctb": {
+                "version": 5,
+                "aes": {
+                    "enabled": true,
+                    "keyBase64": "MDEyMzQ1Njc4OWFiY2RlZg==",
+                    "ivBase64": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NQ=="
+                }
+            }
+        }"#
+        .to_string();
+
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let err = build_ctb_container_bytes(&job, &prepared)
+            .expect_err("invalid key/iv lengths should be rejected");
+        assert!(err.to_string().contains("CTB AES key must be 32 bytes"));
     }
 }
