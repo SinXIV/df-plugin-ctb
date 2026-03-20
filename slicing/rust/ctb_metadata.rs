@@ -166,6 +166,13 @@ fn unix_now_u32() -> u32 {
         .unwrap_or(0)
 }
 
+fn default_layer_xor_key() -> u32 {
+    // Must be deterministic because build metadata is parsed in multiple stages.
+    // If this value changes between stages, layer RLE bytes are encrypted with one
+    // key but header advertises another, causing corrupted layer decode in UVTools.
+    0xEFBE_ADDE
+}
+
 pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel {
     let mut version = DEFAULT_CTB_VERSION;
     let mut machine_name = DEFAULT_MACHINE_NAME.to_string();
@@ -325,6 +332,10 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
         version = hint_version.clamp(2, 5);
     }
 
+    if version >= 5 && layer_xor_key == 0 {
+        layer_xor_key = default_layer_xor_key();
+    }
+
     CtbBuildModel {
         version,
         machine_name,
@@ -436,4 +447,3 @@ pub(super) fn decode_embedded_disclaimer_bytes() -> Result<Vec<u8>, SlicerV3Erro
             ))
         })
 }
-

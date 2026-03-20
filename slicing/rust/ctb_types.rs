@@ -18,6 +18,10 @@ pub(super) const CTB_PRINT_PARAMETERS_V4_RESERVED_SIZE: usize = 380;
 pub(super) const CTB_LAYER_DEF_SIZE: u32 = 36;
 pub(super) const CTB_LAYER_DEF_EX_SIZE: u32 = 84;
 pub(super) const CTB_PAGE_SIZE: u64 = 4_294_967_296;
+pub(super) const CTB_ENCRYPTED_HEADER_SIZE: u32 = 48;
+pub(super) const CTB_ENCRYPTED_SETTINGS_SIZE: u32 = 288;
+pub(super) const CTB_ENCRYPTED_SETTINGS_OFFSET: u32 = 48;
+pub(super) const CTB_ENCRYPTED_LAYER_DEF_SIZE: u32 = 88;
 
 pub(super) const CTB_DISCLAIMER_SIZE: usize = 320;
 pub(super) const CTB_DISCLAIMER_B64: &str = "TGF5b3V0IGFuZCByZWNvcmQgZm9ybWF0IGZvciB0aGUgY3RiIGFuZCBjYmRkbHAgZmlsZSB0eXBlcyBhcmUgdGhlIGNvcHlyaWdodGVkIHByb2dyYW1zIG9yIGNvZGVzIG9mIENCRCBUZWNobm9sb2d5IChDaGluYSkgSW5jLi5UaGUgQ3VzdG9tZXIgb3IgVXNlciBzaGFsbCBub3QgaW4gYW55IG1hbm5lciByZXByb2R1Y2UsIGRpc3RyaWJ1dGUsIG1vZGlmeSwgZGVjb21waWxlLCBkaXNhc3NlbWJsZSwgZGVjcnlwdCwgZXh0cmFjdCwgcmV2ZXJzZSBlbmdpbmVlciwgbGVhc2UsIGFzc2lnbiwgb3Igc3VibGljZW5zZSB0aGUgc2FpZCBwcm9ncmFtcyBvciBjb2Rlcy4=";
@@ -104,4 +108,5 @@ pub(super) struct CtbResinPayload {
     pub resin_name_bytes: Vec<u8>,
     pub tail_padding_bytes: usize,
 }
+
 

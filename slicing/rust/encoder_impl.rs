@@ -1,4 +1,6 @@
 mod ctb_crypto;
+mod ctb_v5;
+mod ctb_v5enc;
 mod ctb_layout;
 mod ctb_metadata;
 mod ctb_preview;
@@ -453,9 +455,9 @@ impl FormatEncoder for CtbPluginEncoder {
 mod tests {
     use super::{
         build_ctb_container_bytes, ctb_layer_rle_xor, ctb_preview,
-        decode_embedded_disclaimer_bytes, normalize_to_binary_mask, parse_threshold_from_metadata,
-        push_ctb_run, rle_encode_mask_row_major, CtbPreparedLayer, CTB_DISCLAIMER_SIZE,
-        CTB_HEADER_SIZE,
+        decode_embedded_disclaimer_bytes, normalize_to_binary_mask, parse_ctb_build_model_from_job,
+        parse_threshold_from_metadata, push_ctb_run, rle_encode_mask_row_major, CtbPreparedLayer,
+        CTB_DISCLAIMER_SIZE, CTB_HEADER_SIZE,
     };
     use crate::types::SliceJobV3;
 
@@ -706,9 +708,15 @@ mod tests {
     #[test]
     fn ctb_v5_writes_resin_parameters_address() {
         let mut job = make_test_job();
-        job.metadata_json =
-            r#"{ "ctb": { "version": 5, "resinName": "FastResin", "resinType": "ABS-Like" } }"#
-                .to_string();
+        job.metadata_json = r#"{
+            "ctb": {
+                "version": 5,
+                "resinName": "FastResin",
+                "resinType": "ABS-Like",
+                "ModifiedDate": 1735689600
+            }
+        }"#
+        .to_string();
 
         let prepared = vec![CtbPreparedLayer {
             index: 0,
@@ -718,7 +726,19 @@ mod tests {
 
         let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
 
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let encryption_key = u32::from_le_bytes(bytes[100..104].try_into().unwrap());
+        assert_eq!(magic, 0x12FD_0086);
+        assert_eq!(version, 5);
+        assert_ne!(encryption_key, 0);
+
         let slicer_offset = u32::from_le_bytes(bytes[104..108].try_into().unwrap()) as usize;
+        let modified_timestamp_minutes = u32::from_le_bytes(
+            bytes[slicer_offset + 40..slicer_offset + 44]
+                .try_into()
+                .unwrap(),
+        );
         let print_params_v4_addr = u32::from_le_bytes(
             bytes[slicer_offset + 64..slicer_offset + 68]
                 .try_into()
@@ -732,6 +752,21 @@ mod tests {
 
         assert!(resin_addr > print_params_v4_addr);
         assert!(resin_addr < bytes.len());
+        assert_eq!(modified_timestamp_minutes, 1_735_689_600 / 60);
+    }
+
+    #[test]
+    fn ctb_v5_default_encryption_key_is_stable_and_nonzero() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{ "ctb": { "version": 5 } }"#.to_string();
+
+        let first = parse_ctb_build_model_from_job(&job);
+        let second = parse_ctb_build_model_from_job(&job);
+
+        assert_eq!(first.layer_xor_key, 0xEFBE_ADDE);
+        assert_eq!(second.layer_xor_key, 0xEFBE_ADDE);
+        assert_ne!(first.layer_xor_key, 0);
+        assert_eq!(first.layer_xor_key, second.layer_xor_key);
     }
 
     #[test]
