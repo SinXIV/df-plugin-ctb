@@ -559,6 +559,37 @@ mod tests {
     }
 
     #[test]
+    fn metadata_timing_simple_mode_zeroes_two_stage_fields() {
+        let meta = r#"{
+            "printer": {
+                "settingsMode": "simple"
+            },
+            "export": {
+                "ctb": {
+                    "liftDistanceMm": 6.0,
+                    "liftSpeedMmMin": 60.0,
+                    "retractDistanceMm": 4.0,
+                    "retractSpeedMmMin": 150.0,
+                    "liftDistance2Mm": 2.5,
+                    "liftSpeed2MmMin": 75.0,
+                    "retractDistance2Mm": 1.25,
+                    "retractSpeed2MmMin": 110.0,
+                    "bottomRetractSpeed2MmMin": 90.0,
+                    "bottomRetractHeight2Mm": 0.8
+                }
+            }
+        }"#;
+
+        let timing = parse_timing_model_from_metadata(meta);
+        assert!((timing.lift_distance2_mm - 0.0).abs() < f32::EPSILON);
+        assert!((timing.lift_speed2_mm_min - 0.0).abs() < f32::EPSILON);
+        assert!((timing.retract_distance2_mm - 0.0).abs() < f32::EPSILON);
+        assert!((timing.retract_speed2_mm_min - 0.0).abs() < f32::EPSILON);
+        assert!((timing.bottom_retract_speed2_mm_min - 0.0).abs() < f32::EPSILON);
+        assert!((timing.bottom_retract_height2_mm - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn layer_xor_roundtrip_restores_original() {
         let seed = 0x1234_5678;
         let layer_index = 7;

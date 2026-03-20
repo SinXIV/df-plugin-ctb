@@ -100,6 +100,35 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         .and_then(|obj| obj.get("timing"))
         .and_then(Value::as_object);
 
+    let settings_mode = ctb
+        .and_then(|m| m.get("settingsMode"))
+        .and_then(Value::as_str)
+        .or_else(|| ctb.and_then(|m| m.get("mode")).and_then(Value::as_str))
+        .or_else(|| {
+            export_ctb
+                .and_then(|m| m.get("settingsMode"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            export_ctb
+                .and_then(|m| m.get("mode"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            meta.get("printer")
+                .and_then(Value::as_object)
+                .and_then(|m| m.get("settingsMode"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            meta.get("printer")
+                .and_then(Value::as_object)
+                .and_then(|m| m.get("mode"))
+                .and_then(Value::as_str)
+        })
+        .map(|v| v.trim().to_ascii_lowercase());
+    let is_simple_mode = matches!(settings_mode.as_deref(), Some("simple"));
+
     let read_f32 = |key: &str| {
         ctb.and_then(|m| m.get(key))
             .and_then(Value::as_f64)
@@ -212,6 +241,15 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
     }
     if timing.bottom_retract_height2_mm <= 0.0 {
         timing.bottom_retract_height2_mm = timing.retract_distance2_mm;
+    }
+
+    if is_simple_mode {
+        timing.lift_distance2_mm = 0.0;
+        timing.lift_speed2_mm_min = 0.0;
+        timing.retract_distance2_mm = 0.0;
+        timing.retract_speed2_mm_min = 0.0;
+        timing.bottom_retract_speed2_mm_min = 0.0;
+        timing.bottom_retract_height2_mm = 0.0;
     }
 
     timing
