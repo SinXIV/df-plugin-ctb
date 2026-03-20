@@ -230,6 +230,8 @@ impl FormatEncoder for CtbPluginEncoder {
             let worker_threshold = threshold;
             let worker_layer_xor_key = build.layer_xor_key;
             let worker_expected_pixels = expected_pixels;
+            let worker_is_anti_aliased =
+                job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
 
             let handle = thread::spawn(move || loop {
                 let task = work_rx.recv();
@@ -266,6 +268,7 @@ impl FormatEncoder for CtbPluginEncoder {
                 let prepared = encode_single_ctb_layer_from_raw_mask(
                     layer_index as usize,
                     &raw_mask,
+                    worker_is_anti_aliased,
                     worker_threshold,
                     worker_layer_xor_key,
                 );
@@ -347,8 +350,10 @@ impl FormatEncoder for CtbPluginEncoder {
             }
         });
 
+        let is_anti_aliased = job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
         let prepared = prepare_layers_for_ctb_with_progress(
             raw_masks,
+            is_anti_aliased,
             threshold,
             build.layer_xor_key,
             prepare_progress.as_ref().map(|cb| cb as &dyn Fn(u32, u32)),
@@ -415,7 +420,9 @@ impl FormatEncoder for CtbPluginEncoder {
 
         let threshold = parse_threshold_from_metadata(&job.metadata_json);
         let build = parse_ctb_build_model_from_job(job);
-        let prepared = prepare_layers_for_ctb(raw_masks, threshold, build.layer_xor_key);
+        let is_anti_aliased = job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
+        let prepared =
+            prepare_layers_for_ctb(raw_masks, is_anti_aliased, threshold, build.layer_xor_key);
 
         let source_bytes: usize = prepared.iter().map(|l| l.source_len).sum();
         let encoded_bytes: usize = prepared.iter().map(|l| l.encoded.len()).sum();

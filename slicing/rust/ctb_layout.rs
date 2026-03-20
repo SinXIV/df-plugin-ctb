@@ -62,28 +62,34 @@ fn page_number_and_offset(absolute_offset: u64) -> (u32, u32) {
     (page, offset)
 }
 
-#[cfg(test)]
 pub(super) fn rle_encode_mask_row_major(mask: &[u8]) -> Vec<u8> {
     if mask.is_empty() {
         return Vec::new();
     }
 
-    let mut out = Vec::with_capacity(mask.len() / 2);
+    let mut out = Vec::with_capacity(32 * 1024);
     let mut run_value = mask[0];
-    let mut run_len: u32 = 1;
+    let mut run_len = 0u32;
+    let mut i = 0;
 
-    for &px in &mask[1..] {
-        if px == run_value {
-            run_len = run_len.saturating_add(1);
-            continue;
+    let len = mask.len();
+    while i < len {
+        let chunk = &mask[i..];
+        if let Some(pos) = chunk.iter().position(|&x| x != run_value) {
+            run_len += pos as u32;
+            i += pos;
+            push_ctb_run(&mut out, run_len, run_value);
+            run_value = mask[i];
+            run_len = 0;
+        } else {
+            run_len += (len - i) as u32;
+            break;
         }
-
-        push_ctb_run(&mut out, run_len, run_value);
-        run_value = px;
-        run_len = 1;
     }
 
-    push_ctb_run(&mut out, run_len, run_value);
+    if run_len > 0 {
+        push_ctb_run(&mut out, run_len, run_value);
+    }
     out
 }
 
@@ -136,10 +142,16 @@ fn rle_encode_thresholded_row_major(mask: &[u8], threshold: u8) -> Vec<u8> {
 pub(super) fn encode_single_ctb_layer_from_raw_mask(
     layer_index: usize,
     raw_mask: &[u8],
+    is_anti_aliased: bool,
     threshold: u8,
     layer_xor_key: u32,
 ) -> CtbPreparedLayer {
-    let mut encoded = rle_encode_thresholded_row_major(raw_mask, threshold);
+    let mut encoded = if is_anti_aliased {
+        rle_encode_mask_row_major(raw_mask)
+    } else {
+        rle_encode_thresholded_row_major(raw_mask, threshold)
+    };
+
     ctb_layer_rle_xor(layer_xor_key, layer_index as u32, &mut encoded);
     CtbPreparedLayer {
         index: layer_index,
@@ -258,14 +270,16 @@ pub(super) fn ctb_layer_rle_xor(seed: u32, layer_index: u32, bytes: &mut [u8]) {
 
 pub(super) fn prepare_layers_for_ctb(
     raw_masks: &[Vec<u8>],
+    is_anti_aliased: bool,
     threshold: u8,
     layer_xor_key: u32,
 ) -> Vec<CtbPreparedLayer> {
-    prepare_layers_for_ctb_with_progress(raw_masks, threshold, layer_xor_key, None)
+    prepare_layers_for_ctb_with_progress(raw_masks, is_anti_aliased, threshold, layer_xor_key, None)
 }
 
 pub(super) fn prepare_layers_for_ctb_with_progress(
     raw_masks: &[Vec<u8>],
+    is_anti_aliased: bool,
     threshold: u8,
     layer_xor_key: u32,
     on_progress: Option<&dyn Fn(u32, u32)>,
@@ -277,6 +291,7 @@ pub(super) fn prepare_layers_for_ctb_with_progress(
         out.push(encode_single_ctb_layer_from_raw_mask(
             index,
             layer,
+            is_anti_aliased,
             threshold,
             layer_xor_key,
         ));
