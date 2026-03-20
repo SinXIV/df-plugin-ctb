@@ -5,6 +5,7 @@ export const CTB_FORMAT_DEFINITION: SlicingFormatDefinition = {
   outputFormat: '.ctb',
   displayName: 'CTB',
   ownership: 'plugin',
+  layerDataKind: 'raw-mask',
   pluginId: 'ctb',
   rustModulePath: 'formats::ctb',
   wasmExportName: 'encode_ctb_container',
