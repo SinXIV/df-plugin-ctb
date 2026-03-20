@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn ctb_aes_mode_writes_encrypted_magic_and_signature_trailer() {
+    fn ctb_v5enc_emits_encrypted_magic_and_signature_header_fields() {
         let mut job = make_test_job();
         job.metadata_json = r#"{
             "ctb": {
@@ -746,6 +746,7 @@ mod tests {
             }
         }"#
         .to_string();
+        job.format_version = Some("v5enc".to_string());
 
         let prepared = vec![CtbPreparedLayer {
             index: 0,
@@ -753,25 +754,26 @@ mod tests {
             encoded: vec![2, 0, 255],
         }];
 
-        let bytes = build_ctb_container_bytes(&job, &prepared).expect("aes mode should build");
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("v5enc mode should build");
 
         let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         assert_eq!(magic, 0x12FD_0107);
 
-        assert!(bytes.len() > 12);
-        let tail = &bytes[bytes.len() - 4..];
-        let trailer = u32::from_le_bytes(tail.try_into().unwrap());
-        assert_eq!(trailer, 0x6D42_32B3);
+        let settings_size = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let settings_offset = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let signature_size = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
+        let signature_offset = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        assert_eq!(settings_size, 288);
+        assert_eq!(settings_offset, 48);
+        assert_eq!(signature_size, 32);
+        assert!(signature_offset > 48 + 288);
 
-        let marker_pos = bytes
-            .windows(4)
-            .position(|w| w == 0x4220_52FAu32.to_le_bytes())
-            .expect("signature marker should exist");
-        assert!(marker_pos > CTB_HEADER_SIZE as usize);
+        let trailer = u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap());
+        assert_eq!(trailer, 1_833_054_899);
     }
 
     #[test]
-    fn ctb_aes_mode_rejects_invalid_key_or_iv_lengths() {
+    fn ctb_v5enc_ignores_legacy_invalid_aes_key_or_iv_metadata() {
         let mut job = make_test_job();
         job.metadata_json = r#"{
             "ctb": {
@@ -791,8 +793,10 @@ mod tests {
             encoded: vec![2, 0, 255],
         }];
 
-        let err = build_ctb_container_bytes(&job, &prepared)
-            .expect_err("invalid key/iv lengths should be rejected");
-        assert!(err.to_string().contains("CTB AES key must be 32 bytes"));
+        job.format_version = Some("v5enc".to_string());
+        let bytes = build_ctb_container_bytes(&job, &prepared)
+            .expect("invalid legacy aes fields are ignored");
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(magic, 0x12FD_0107);
     }
 }

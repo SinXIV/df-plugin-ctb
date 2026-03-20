@@ -8,8 +8,7 @@ export const CTB_FORMAT_DEFINITION: SlicingFormatDefinition = {
   layerDataKind: 'raw-mask',
   pluginId: 'ctb',
   formatVersions: [
-    { value: 'v2v3', label: 'V2/V3' },
-    { value: 'v4v5', label: 'V4/V5', isDefault: true },
+    { value: 'v5', label: 'V5', isDefault: true },
     { value: 'v5enc', label: 'V5 ENC' },
   ],
   rustModulePath: 'formats::ctb',

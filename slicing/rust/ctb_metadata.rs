@@ -5,16 +5,16 @@ use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::ctb_types::{
-    CtbAesModel, CtbBuildModel, CtbResinModel, CtbTimingModel, CTB_DISCLAIMER_B64,
-    DEFAULT_BINARY_THRESHOLD, DEFAULT_CTB_VERSION, DEFAULT_MACHINE_NAME, DEFAULT_RESIN_DENSITY,
-    DEFAULT_RESIN_NAME, DEFAULT_RESIN_TYPE,
+    CtbBuildModel, CtbResinModel, CtbTimingModel, CTB_DISCLAIMER_B64, DEFAULT_BINARY_THRESHOLD,
+    DEFAULT_CTB_VERSION, DEFAULT_MACHINE_NAME, DEFAULT_RESIN_DENSITY, DEFAULT_RESIN_NAME,
+    DEFAULT_RESIN_TYPE,
 };
 
 fn parse_json(metadata_json: &str) -> Option<Value> {
     serde_json::from_str::<Value>(metadata_json).ok()
 }
 
-fn parse_ctb_format_version_hint(value: Option<&str>) -> Option<(u32, bool)> {
+pub(super) fn parse_ctb_format_version_hint(value: Option<&str>) -> Option<(u32, bool)> {
     let raw = value?.trim();
     if raw.is_empty() {
         return None;
@@ -27,12 +27,16 @@ fn parse_ctb_format_version_hint(value: Option<&str>) -> Option<(u32, bool)> {
         .collect();
 
     match normalized.as_str() {
-        "2" | "v2" | "3" | "v3" | "v2v3" | "ctbv2v3" => Some((3, false)),
-        "4" | "v4" | "v4v5" | "ctbv4v5" => Some((4, false)),
+        "2" | "v2" | "3" | "v3" | "v2v3" | "ctbv2v3" => Some((5, false)),
+        "4" | "v4" | "v4v5" | "ctbv4v5" => Some((5, false)),
         "5" | "v5" => Some((5, false)),
         "v5enc" | "v5encrypted" | "v5encryption" | "v5aes" | "ctbv5enc" => Some((5, true)),
         _ => None,
     }
+}
+
+pub(super) fn parse_ctb_format_version_hint_from_job(job: &SliceJobV3) -> Option<(u32, bool)> {
+    parse_ctb_format_version_hint(job.format_version.as_deref())
 }
 
 pub(super) fn parse_threshold_from_metadata(metadata_json: &str) -> u8 {
@@ -172,7 +176,7 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
     let mut layer_xor_key = 0_u32;
     let mut projector_type = if job.mirror_x || job.mirror_y { 1 } else { 0 };
     let mut per_layer_settings = false;
-    let format_hint = parse_ctb_format_version_hint(job.format_version.as_deref());
+    let format_hint = parse_ctb_format_version_hint_from_job(job);
 
     if let Some(meta) = parse_json(&job.metadata_json) {
         let version_direct = parse_u32_meta(&meta, "ctb", "version");
@@ -433,57 +437,3 @@ pub(super) fn decode_embedded_disclaimer_bytes() -> Result<Vec<u8>, SlicerV3Erro
         })
 }
 
-pub(super) fn parse_ctb_aes_model_from_job(job: &SliceJobV3) -> CtbAesModel {
-    let format_hint = parse_ctb_format_version_hint(job.format_version.as_deref());
-
-    let Some(meta) = parse_json(&job.metadata_json) else {
-        return CtbAesModel {
-            enabled: format_hint
-                .map(|(_, is_encrypted)| is_encrypted)
-                .unwrap_or(false),
-            key: None,
-            iv: None,
-        };
-    };
-
-    let read_bool = |k: &str| {
-        meta.get("ctb")
-            .and_then(|v| v.get("aes"))
-            .and_then(|v| v.get(k))
-            .and_then(Value::as_bool)
-            .or_else(|| {
-                meta.get("export")
-                    .and_then(|v| v.get("ctb"))
-                    .and_then(|v| v.get("aes"))
-                    .and_then(|v| v.get(k))
-                    .and_then(Value::as_bool)
-            })
-    };
-
-    let read_str = |k: &str| {
-        meta.get("ctb")
-            .and_then(|v| v.get("aes"))
-            .and_then(|v| v.get(k))
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .or_else(|| {
-                meta.get("export")
-                    .and_then(|v| v.get("ctb"))
-                    .and_then(|v| v.get("aes"))
-                    .and_then(|v| v.get(k))
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-            })
-    };
-
-    let mut enabled = read_bool("enabled").unwrap_or(false);
-    if let Some((_, hinted_encryption)) = format_hint {
-        enabled = hinted_encryption;
-    }
-    let key = read_str("keyBase64")
-        .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok());
-    let iv =
-        read_str("ivBase64").and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok());
-
-    CtbAesModel { enabled, key, iv }
-}

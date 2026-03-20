@@ -1,48 +1,32 @@
 use crate::engine::SlicerV3Error;
-use aes::cipher::block_padding::{NoPadding, ZeroPadding};
+use aes::cipher::block_padding::NoPadding;
 use aes::cipher::{BlockEncryptMut, KeyIvInit};
 use aes::Aes256;
 
-use super::ctb_types::CtbAesModel;
-
-const CTB_AES_DEFAULT_KEY: [u8; 32] = [
-    0xD0, 0x5B, 0x8E, 0x33, 0x71, 0xDE, 0x3D, 0x1A, 0xE5, 0x4F, 0x22, 0xDD, 0xDF, 0x5B, 0xFD, 0x94,
-    0xAB, 0x5D, 0x64, 0x3A, 0x9D, 0x7E, 0xBF, 0xAF, 0x42, 0x03, 0xF3, 0x10, 0xD8, 0x52, 0x2A, 0xEA,
+const CTB_AES_OBFUSCATION: &[u8; 14] = b"DragonFruitFTW";
+const CTB_AES_DEFAULT_KEY_XOR: [u8; 32] = [
+    0x94, 0x29, 0xEF, 0x54, 0x1E, 0xB0, 0x7B, 0x68, 0x90, 0x26, 0x56, 0x9B, 0x8B, 0x0C, 0xB9, 0xE6,
+    0xCA, 0x3A, 0x0B, 0x54, 0xDB, 0x0C, 0xCA, 0xC6, 0x36, 0x45, 0xA7, 0x47, 0x9C, 0x20, 0x4B, 0x8D,
 ];
-const CTB_AES_DEFAULT_IV: [u8; 16] = [
-    0x0F, 0x01, 0x0A, 0x05, 0x05, 0x0B, 0x06, 0x07, 0x08, 0x06, 0x0A, 0x0C, 0x0C, 0x0D, 0x09, 0x0F,
+const CTB_AES_DEFAULT_IV_XOR: [u8; 16] = [
+    0x4B, 0x73, 0x6B, 0x62, 0x6A, 0x65, 0x40, 0x75, 0x7D, 0x6F, 0x7E, 0x4A, 0x58, 0x5A, 0x4D, 0x7D,
 ];
 
-pub(super) fn resolve_ctb_aes_material(
-    aes: &CtbAesModel,
-) -> Result<Option<([u8; 32], [u8; 16])>, SlicerV3Error> {
-    if !aes.enabled {
-        return Ok(None);
+fn xor_deobfuscate<const N: usize>(input: [u8; N]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut i = 0usize;
+    while i < N {
+        out[i] = input[i] ^ CTB_AES_OBFUSCATION[i % CTB_AES_OBFUSCATION.len()];
+        i += 1;
     }
+    out
+}
 
-    let mut key = CTB_AES_DEFAULT_KEY;
-    if let Some(k) = aes.key.as_ref() {
-        if k.len() != 32 {
-            return Err(SlicerV3Error::UnsupportedOutput(format!(
-                "CTB AES key must be 32 bytes when provided, got {} bytes",
-                k.len()
-            )));
-        }
-        key.copy_from_slice(k);
-    }
-
-    let mut iv = CTB_AES_DEFAULT_IV;
-    if let Some(v) = aes.iv.as_ref() {
-        if v.len() != 16 {
-            return Err(SlicerV3Error::UnsupportedOutput(format!(
-                "CTB AES IV must be 16 bytes when provided, got {} bytes",
-                v.len()
-            )));
-        }
-        iv.copy_from_slice(v);
-    }
-
-    Ok(Some((key, iv)))
+pub(super) fn ctb_default_key_iv() -> ([u8; 32], [u8; 16]) {
+    (
+        xor_deobfuscate(CTB_AES_DEFAULT_KEY_XOR),
+        xor_deobfuscate(CTB_AES_DEFAULT_IV_XOR),
+    )
 }
 
 pub(super) fn ctb_encrypt_in_place_no_padding(
@@ -71,31 +55,4 @@ pub(super) fn ctb_encrypt_in_place_no_padding(
         })?;
 
     Ok(())
-}
-
-pub(super) fn ctb_encrypt_padded_vec(
-    bytes: &[u8],
-    key: &[u8; 32],
-    iv: &[u8; 16],
-) -> Result<Vec<u8>, SlicerV3Error> {
-    let mut out = bytes.to_vec();
-    out.resize(out.len().next_multiple_of(32), 0);
-    let len = out.len();
-
-    cbc::Encryptor::<Aes256>::new(key.into(), iv.into())
-        .encrypt_padded_mut::<ZeroPadding>(&mut out, len)
-        .map_err(|e| SlicerV3Error::UnsupportedOutput(format!("CTB AES encryption failed: {e}")))?;
-
-    Ok(out)
-}
-
-pub(super) fn pad_vec_to_block(bytes: &mut Vec<u8>, block: usize) {
-    if block == 0 {
-        return;
-    }
-    let rem = bytes.len() % block;
-    if rem == 0 {
-        return;
-    }
-    bytes.resize(bytes.len() + (block - rem), 0);
 }

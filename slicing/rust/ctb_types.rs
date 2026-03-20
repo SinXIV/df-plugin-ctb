@@ -1,5 +1,5 @@
 pub(super) const DEFAULT_BINARY_THRESHOLD: u8 = 127;
-pub(super) const DEFAULT_CTB_VERSION: u32 = 4;
+pub(super) const DEFAULT_CTB_VERSION: u32 = 5;
 pub(super) const DEFAULT_MACHINE_NAME: &str = "DragonFruit CTB";
 pub(super) const DEFAULT_RESIN_NAME: &str = "DragonFruit Resin";
 pub(super) const DEFAULT_RESIN_TYPE: &str = "Standard";
@@ -105,9 +105,3 @@ pub(super) struct CtbResinPayload {
     pub tail_padding_bytes: usize,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct CtbAesModel {
-    pub enabled: bool,
-    pub key: Option<Vec<u8>>,
-    pub iv: Option<Vec<u8>>,
-}
