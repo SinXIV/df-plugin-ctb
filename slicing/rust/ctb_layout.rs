@@ -94,20 +94,40 @@ fn rle_encode_thresholded_row_major(mask: &[u8], threshold: u8) -> Vec<u8> {
     // that serialize on the OS allocator lock, causing low CPU utilization.
     let mut out = Vec::with_capacity(32 * 1024);
     let mut run_value = if mask[0] > threshold { 255 } else { 0 };
-    let mut run_len = 1u32;
+    let mut run_len = 0u32;
+    let mut i = 0;
 
-    for &px in &mask[1..] {
-        let bpx = if px > threshold { 255 } else { 0 };
-        if bpx == run_value {
-            run_len += 1;
+    let len = mask.len();
+    while i < len {
+        let chunk = &mask[i..];
+        if run_value == 0 {
+            if let Some(pos) = chunk.iter().position(|&x| x > threshold) {
+                run_len += pos as u32;
+                i += pos;
+                push_ctb_run(&mut out, run_len, run_value);
+                run_value = 255;
+                run_len = 0;
+            } else {
+                run_len += (len - i) as u32;
+                break;
+            }
         } else {
-            push_ctb_run(&mut out, run_len, run_value);
-            run_value = bpx;
-            run_len = 1;
+            if let Some(pos) = chunk.iter().position(|&x| x <= threshold) {
+                run_len += pos as u32;
+                i += pos;
+                push_ctb_run(&mut out, run_len, run_value);
+                run_value = 0;
+                run_len = 0;
+            } else {
+                run_len += (len - i) as u32;
+                break;
+            }
         }
     }
 
-    push_ctb_run(&mut out, run_len, run_value);
+    if run_len > 0 {
+        push_ctb_run(&mut out, run_len, run_value);
+    }
     out
 }
 
