@@ -48,8 +48,13 @@ pub(super) struct CtbTimingModel {
     pub bottom_light_off_delay_sec: f32,
     pub bottom_layer_count: u32,
     pub lift_distance_mm: f32,
+    pub lift_distance2_mm: f32,
     pub lift_speed_mm_min: f32,
+    pub lift_speed2_mm_min: f32,
+    pub retract_distance_mm: f32,
+    pub retract_distance2_mm: f32,
     pub retract_speed_mm_min: f32,
+    pub retract_speed2_mm_min: f32,
     pub bottom_retract_speed_mm_min: f32,
     pub bottom_retract_speed2_mm_min: f32,
     pub bottom_retract_height2_mm: f32,
@@ -108,5 +113,3 @@ pub(super) struct CtbResinPayload {
     pub resin_name_bytes: Vec<u8>,
     pub tail_padding_bytes: usize,
 }
-
-

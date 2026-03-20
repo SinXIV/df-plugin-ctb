@@ -1,10 +1,10 @@
 mod ctb_crypto;
-mod ctb_v5;
-mod ctb_v5enc;
 mod ctb_layout;
 mod ctb_metadata;
 mod ctb_preview;
 mod ctb_types;
+mod ctb_v5;
+mod ctb_v5enc;
 
 use crate::encoders::FormatEncoder;
 use crate::encoders::RawMaskStreamEncoder;
@@ -453,6 +453,7 @@ impl FormatEncoder for CtbPluginEncoder {
 
 #[cfg(test)]
 mod tests {
+    use super::ctb_metadata::parse_timing_model_from_metadata;
     use super::{
         build_ctb_container_bytes, ctb_layer_rle_xor, ctb_preview,
         decode_embedded_disclaimer_bytes, normalize_to_binary_mask, parse_ctb_build_model_from_job,
@@ -529,6 +530,32 @@ mod tests {
 
         assert_eq!(parse_threshold_from_metadata(direct), 180);
         assert_eq!(parse_threshold_from_metadata(nested), 200);
+    }
+
+    #[test]
+    fn metadata_timing_prefers_ctb_over_material() {
+        let meta = r#"{
+            "material": {
+                "liftDistanceMm": 4.0,
+                "liftSpeedMmMin": 40.0,
+                "retractSpeedMmMin": 120.0,
+                "bottomLayerCount": 4
+            },
+            "export": {
+                "ctb": {
+                    "liftDistanceMm": 7.5,
+                    "liftSpeedMmMin": 65.0,
+                    "retractSpeedMmMin": 190.0,
+                    "bottomLayerCount": 8
+                }
+            }
+        }"#;
+
+        let timing = parse_timing_model_from_metadata(meta);
+        assert!((timing.lift_distance_mm - 7.5).abs() < f32::EPSILON);
+        assert!((timing.lift_speed_mm_min - 65.0).abs() < f32::EPSILON);
+        assert!((timing.retract_speed_mm_min - 190.0).abs() < f32::EPSILON);
+        assert_eq!(timing.bottom_layer_count, 8);
     }
 
     #[test]

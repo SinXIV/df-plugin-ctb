@@ -77,12 +77,12 @@ fn write_ctb_header(
 fn write_ctb_print_parameters(out: &mut Vec<u8>, timing: CtbTimingModel) {
     push_f32(out, timing.lift_distance_mm);
     push_f32(out, timing.lift_speed_mm_min);
-    push_f32(out, timing.lift_distance_mm);
-    push_f32(out, timing.lift_speed_mm_min);
+    push_f32(out, timing.lift_distance2_mm);
+    push_f32(out, timing.lift_speed2_mm_min);
     push_f32(out, timing.retract_speed_mm_min);
-    push_f32(out, 0.0);
-    push_f32(out, 0.0);
-    push_f32(out, 0.0);
+    push_f32(out, timing.retract_distance_mm);
+    push_f32(out, timing.retract_distance2_mm);
+    push_f32(out, timing.retract_speed2_mm_min);
     push_f32(out, timing.bottom_light_off_delay_sec);
     push_f32(out, timing.light_off_delay_sec);
     push_u32(out, timing.bottom_layer_count);
@@ -102,8 +102,8 @@ fn write_ctb_slicer_info_fixed(
 ) {
     push_f32(out, timing.lift_distance_mm);
     push_f32(out, timing.lift_speed_mm_min);
-    push_f32(out, 0.0);
-    push_f32(out, 0.0);
+    push_f32(out, timing.retract_distance_mm);
+    push_f32(out, timing.retract_distance2_mm);
     push_f32(out, timing.bottom_retract_height2_mm);
     push_f32(out, timing.bottom_retract_speed2_mm_min);
     push_f32(out, timing.wait_time_after_lift_sec);
@@ -154,9 +154,9 @@ fn write_ctb_print_parameters_v4(
     push_f32(out, timing.bottom_retract_speed_mm_min);
     push_f32(out, timing.bottom_retract_speed2_mm_min);
     push_u32(out, 0);
-    push_f32(out, 4.0);
+    push_f32(out, timing.retract_distance_mm.max(0.0));
     push_u32(out, 0);
-    push_f32(out, 4.0);
+    push_f32(out, timing.retract_distance2_mm.max(0.0));
     push_f32(out, timing.wait_time_before_cure_sec);
     push_f32(out, timing.wait_time_after_lift_sec);
     push_f32(out, timing.wait_time_after_cure_sec);

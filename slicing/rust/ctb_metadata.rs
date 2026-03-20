@@ -70,8 +70,13 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
             bottom_light_off_delay_sec: 0.0,
             bottom_layer_count: 0,
             lift_distance_mm: 0.0,
+            lift_distance2_mm: 0.0,
             lift_speed_mm_min: 0.0,
+            lift_speed2_mm_min: 0.0,
+            retract_distance_mm: 0.0,
+            retract_distance2_mm: 0.0,
             retract_speed_mm_min: 0.0,
+            retract_speed2_mm_min: 0.0,
             bottom_retract_speed_mm_min: 0.0,
             bottom_retract_speed2_mm_min: 0.0,
             bottom_retract_height2_mm: 0.0,
@@ -83,28 +88,59 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
     };
 
     let material = meta.get("material").and_then(Value::as_object);
+    let ctb = meta.get("ctb").and_then(Value::as_object);
+    let export_ctb = meta
+        .get("export")
+        .and_then(|v| v.get("ctb"))
+        .and_then(Value::as_object);
+    let ctb_timing = ctb
+        .and_then(|obj| obj.get("timing"))
+        .and_then(Value::as_object);
+    let export_ctb_timing = export_ctb
+        .and_then(|obj| obj.get("timing"))
+        .and_then(Value::as_object);
+
     let read_f32 = |key: &str| {
-        material
-            .and_then(|m| m.get(key))
+        ctb.and_then(|m| m.get(key))
             .and_then(Value::as_f64)
+            .or_else(|| ctb_timing.and_then(|m| m.get(key)).and_then(Value::as_f64))
+            .or_else(|| export_ctb.and_then(|m| m.get(key)).and_then(Value::as_f64))
+            .or_else(|| {
+                export_ctb_timing
+                    .and_then(|m| m.get(key))
+                    .and_then(Value::as_f64)
+            })
+            .or_else(|| material.and_then(|m| m.get(key)).and_then(Value::as_f64))
             .unwrap_or(0.0) as f32
     };
     let read_u32 = |key: &str| {
-        material
-            .and_then(|m| m.get(key))
+        ctb.and_then(|m| m.get(key))
             .and_then(Value::as_u64)
+            .or_else(|| ctb_timing.and_then(|m| m.get(key)).and_then(Value::as_u64))
+            .or_else(|| export_ctb.and_then(|m| m.get(key)).and_then(Value::as_u64))
+            .or_else(|| {
+                export_ctb_timing
+                    .and_then(|m| m.get(key))
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| material.and_then(|m| m.get(key)).and_then(Value::as_u64))
             .unwrap_or(0) as u32
     };
 
-    CtbTimingModel {
+    let mut timing = CtbTimingModel {
         normal_exposure_sec: read_f32("normalExposureSec"),
         bottom_exposure_sec: read_f32("bottomExposureSec"),
         light_off_delay_sec: read_f32("lightOffDelaySec"),
         bottom_light_off_delay_sec: read_f32("bottomLightOffDelaySec"),
         bottom_layer_count: read_u32("bottomLayerCount"),
         lift_distance_mm: read_f32("liftDistanceMm"),
+        lift_distance2_mm: read_f32("liftDistance2Mm"),
         lift_speed_mm_min: read_f32("liftSpeedMmMin"),
+        lift_speed2_mm_min: read_f32("liftSpeed2MmMin"),
+        retract_distance_mm: read_f32("retractDistanceMm"),
+        retract_distance2_mm: read_f32("retractDistance2Mm"),
         retract_speed_mm_min: read_f32("retractSpeedMmMin"),
+        retract_speed2_mm_min: read_f32("retractSpeed2MmMin"),
         bottom_retract_speed_mm_min: read_f32("bottomRetractSpeedMmMin"),
         bottom_retract_speed2_mm_min: read_f32("bottomRetractSpeed2MmMin"),
         bottom_retract_height2_mm: read_f32("bottomRetractHeight2Mm"),
@@ -112,7 +148,33 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         wait_time_before_cure_sec: read_f32("waitTimeBeforeCureSec"),
         wait_time_after_cure_sec: read_f32("waitTimeAfterCureSec"),
         wait_time_after_lift_sec: read_f32("waitTimeAfterLiftSec"),
+    };
+
+    if timing.lift_distance2_mm <= 0.0 {
+        timing.lift_distance2_mm = timing.lift_distance_mm.max(0.0);
     }
+    if timing.lift_speed2_mm_min <= 0.0 {
+        timing.lift_speed2_mm_min = timing.lift_speed_mm_min.max(0.0);
+    }
+    if timing.retract_distance_mm <= 0.0 {
+        timing.retract_distance_mm = timing.lift_distance_mm.max(0.0);
+    }
+    if timing.retract_distance2_mm <= 0.0 {
+        timing.retract_distance2_mm = if timing.bottom_retract_height2_mm > 0.0 {
+            timing.bottom_retract_height2_mm
+        } else {
+            timing.retract_distance_mm.max(0.0)
+        };
+    }
+    if timing.retract_speed2_mm_min <= 0.0 {
+        timing.retract_speed2_mm_min = if timing.bottom_retract_speed2_mm_min > 0.0 {
+            timing.bottom_retract_speed2_mm_min
+        } else {
+            timing.retract_speed_mm_min.max(0.0)
+        };
+    }
+
+    timing
 }
 
 fn parse_u32_meta(meta: &Value, path0: &str, path1: &str) -> Option<u32> {
