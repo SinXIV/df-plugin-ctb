@@ -10,7 +10,7 @@ use crate::engine::SlicerV3Error;
 use crate::types::{LayerAreaStatsV3, RenderedLayersV3, SliceJobV3};
 use ctb_layout::{
     build_ctb_container_bytes, build_ctb_container_bytes_with_progress,
-    encode_single_ctb_layer_from_raw_mask, prepare_layers_for_ctb,
+    encode_single_ctb_empty_layer, encode_single_ctb_layer_from_raw_mask, prepare_layers_for_ctb,
     prepare_layers_for_ctb_with_progress,
 };
 use ctb_metadata::{parse_ctb_build_model_from_job, parse_threshold_from_metadata};
@@ -64,9 +64,9 @@ fn cap_ctb_encode_workers_for_mask_bytes(requested: usize, expected_pixels: usiz
         if bytes_per_mask >= 48 * 1024 * 1024 {
             capped = capped.min(1);
         } else if bytes_per_mask >= 24 * 1024 * 1024 {
-            capped = capped.min(2);
+            capped = capped.min(3);
         } else if bytes_per_mask >= 12 * 1024 * 1024 {
-            capped = capped.min(4);
+            capped = capped.min(6);
         }
     }
 
@@ -85,12 +85,14 @@ fn choose_ctb_encode_queue_depth(worker_count: usize, expected_pixels: usize) ->
         return allowed.min((worker_count.saturating_mul(2)).max(1));
     }
 
-    if bytes_per_mask >= 24 * 1024 * 1024 {
+    if bytes_per_mask >= 48 * 1024 * 1024 {
         1
-    } else if bytes_per_mask >= 12 * 1024 * 1024 {
+    } else if bytes_per_mask >= 24 * 1024 * 1024 {
         2
+    } else if bytes_per_mask >= 12 * 1024 * 1024 {
+        3
     } else {
-        (worker_count.saturating_mul(2)).clamp(2, 16)
+        (worker_count.saturating_mul(3)).clamp(3, 24)
     }
 }
 
@@ -244,12 +246,27 @@ impl FormatEncoder for CtbPluginEncoder {
                     break;
                 };
 
+                if raw_mask.is_empty() {
+                    let prepared = encode_single_ctb_empty_layer(
+                        layer_index as usize,
+                        worker_expected_pixels,
+                        worker_layer_xor_key,
+                    );
+                    crate::pipeline::return_mask_to_pool(raw_mask);
+
+                    if result_tx.send(Ok(prepared)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+
                 if raw_mask.len() != worker_expected_pixels {
+                    let len = raw_mask.len();
+                    crate::pipeline::return_mask_to_pool(raw_mask);
                     let _ =
                         result_tx.send(Err(SlicerV3Error::MissingRenderedLayerPayload(format!(
                             "CTB layer {layer_index} size mismatch: expected {} bytes, got {}",
-                            worker_expected_pixels,
-                            raw_mask.len()
+                            worker_expected_pixels, len
                         ))));
                     continue;
                 }
@@ -260,6 +277,7 @@ impl FormatEncoder for CtbPluginEncoder {
                     worker_threshold,
                     worker_layer_xor_key,
                 );
+                crate::pipeline::return_mask_to_pool(raw_mask);
 
                 if result_tx.send(Ok(prepared)).is_err() {
                     break;

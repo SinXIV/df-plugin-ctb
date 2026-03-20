@@ -92,7 +92,9 @@ fn rle_encode_thresholded_row_major(mask: &[u8], threshold: u8) -> Vec<u8> {
         return Vec::new();
     }
 
-    let mut out = Vec::with_capacity(mask.len() / 2);
+    // CTB output is highly compressed; start small to avoid massive heap allocations
+    // that serialize on the OS allocator lock, causing low CPU utilization.
+    let mut out = Vec::with_capacity(32 * 1024);
     let mut run_value = if mask[0] > threshold { 255 } else { 0 };
     let mut run_len: u32 = 1;
 
@@ -123,6 +125,25 @@ pub(super) fn encode_single_ctb_layer_from_raw_mask(
     CtbPreparedLayer {
         index: layer_index,
         source_len: raw_mask.len(),
+        encoded,
+    }
+}
+
+pub(super) fn encode_single_ctb_empty_layer(
+    layer_index: usize,
+    expected_pixels: usize,
+    layer_xor_key: u32,
+) -> CtbPreparedLayer {
+    let mut encoded = Vec::with_capacity(5);
+    push_ctb_run(
+        &mut encoded,
+        expected_pixels.min(u32::MAX as usize) as u32,
+        0,
+    );
+    ctb_layer_rle_xor(layer_xor_key, layer_index as u32, &mut encoded);
+    CtbPreparedLayer {
+        index: layer_index,
+        source_len: expected_pixels,
         encoded,
     }
 }
