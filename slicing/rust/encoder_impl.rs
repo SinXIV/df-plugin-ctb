@@ -8,6 +8,7 @@ use crate::encoders::FormatEncoder;
 use crate::encoders::RawMaskStreamEncoder;
 use crate::engine::SlicerV3Error;
 use crate::types::{LayerAreaStatsV3, RenderedLayersV3, SliceJobV3};
+use crossbeam_channel::bounded;
 use ctb_layout::{
     build_ctb_container_bytes, build_ctb_container_bytes_with_progress,
     encode_single_ctb_empty_layer, encode_single_ctb_layer_from_raw_mask, prepare_layers_for_ctb,
@@ -15,7 +16,7 @@ use ctb_layout::{
 };
 use ctb_metadata::{parse_ctb_build_model_from_job, parse_threshold_from_metadata};
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 use std::thread;
 
 #[cfg(test)]
@@ -62,11 +63,11 @@ fn cap_ctb_encode_workers_for_mask_bytes(requested: usize, expected_pixels: usiz
     // Be conservative for massive layers to prevent allocation failures.
     if budget_override.is_none() {
         if bytes_per_mask >= 48 * 1024 * 1024 {
-            capped = capped.min(1);
+            capped = capped.min(2);
         } else if bytes_per_mask >= 24 * 1024 * 1024 {
-            capped = capped.min(3);
+            capped = capped.min(4);
         } else if bytes_per_mask >= 12 * 1024 * 1024 {
-            capped = capped.min(6);
+            capped = capped.min(8);
         }
     }
 
@@ -98,7 +99,7 @@ fn choose_ctb_encode_queue_depth(worker_count: usize, expected_pixels: usize) ->
 
 struct CtbRawMaskStreamingEncoder {
     job: SliceJobV3,
-    work_tx: Option<mpsc::SyncSender<(u32, Vec<u8>)>>,
+    work_tx: Option<crossbeam_channel::Sender<(u32, Vec<u8>)>>,
     result_rx: mpsc::Receiver<Result<ctb_types::CtbPreparedLayer, SlicerV3Error>>,
     workers: Vec<thread::JoinHandle<()>>,
     consumed_layers: u32,
@@ -218,29 +219,20 @@ impl FormatEncoder for CtbPluginEncoder {
         let worker_count =
             cap_ctb_encode_workers_for_mask_bytes(choose_ctb_encode_threads(), expected_pixels);
         let queue_depth = choose_ctb_encode_queue_depth(worker_count, expected_pixels);
-        let (work_tx, work_rx) = mpsc::sync_channel::<(u32, Vec<u8>)>(queue_depth);
+        let (work_tx, work_rx) = bounded::<(u32, Vec<u8>)>(queue_depth);
         let (result_tx, result_rx) =
             mpsc::channel::<Result<ctb_types::CtbPreparedLayer, SlicerV3Error>>();
-        let work_rx = Arc::new(Mutex::new(work_rx));
         let mut workers = Vec::with_capacity(worker_count);
 
         for _ in 0..worker_count {
-            let work_rx = Arc::clone(&work_rx);
+            let work_rx = work_rx.clone();
             let result_tx = result_tx.clone();
             let worker_threshold = threshold;
             let worker_layer_xor_key = build.layer_xor_key;
             let worker_expected_pixels = expected_pixels;
 
             let handle = thread::spawn(move || loop {
-                let task = match work_rx.lock() {
-                    Ok(rx) => rx.recv(),
-                    Err(_) => {
-                        let _ = result_tx.send(Err(SlicerV3Error::UnsupportedOutput(
-                            "CTB streaming work queue lock poisoned".to_string(),
-                        )));
-                        break;
-                    }
-                };
+                let task = work_rx.recv();
 
                 let Ok((layer_index, raw_mask)) = task else {
                     break;

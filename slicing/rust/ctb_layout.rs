@@ -96,21 +96,40 @@ fn rle_encode_thresholded_row_major(mask: &[u8], threshold: u8) -> Vec<u8> {
     // that serialize on the OS allocator lock, causing low CPU utilization.
     let mut out = Vec::with_capacity(32 * 1024);
     let mut run_value = if mask[0] > threshold { 255 } else { 0 };
-    let mut run_len: u32 = 1;
+    let mut run_len = 0u32;
+    let mut i = 0;
 
-    for &px in &mask[1..] {
-        let next = if px > threshold { 255 } else { 0 };
-        if next == run_value {
-            run_len = run_len.saturating_add(1);
-            continue;
+    let len = mask.len();
+    while i < len {
+        let chunk = &mask[i..];
+        if run_value == 0 {
+            if let Some(pos) = chunk.iter().position(|&x| x > threshold) {
+                run_len += pos as u32;
+                i += pos;
+                push_ctb_run(&mut out, run_len, run_value);
+                run_value = 255;
+                run_len = 0;
+            } else {
+                run_len += (len - i) as u32;
+                break;
+            }
+        } else {
+            if let Some(pos) = chunk.iter().position(|&x| x <= threshold) {
+                run_len += pos as u32;
+                i += pos;
+                push_ctb_run(&mut out, run_len, run_value);
+                run_value = 0;
+                run_len = 0;
+            } else {
+                run_len += (len - i) as u32;
+                break;
+            }
         }
-
-        push_ctb_run(&mut out, run_len, run_value);
-        run_value = next;
-        run_len = 1;
     }
 
-    push_ctb_run(&mut out, run_len, run_value);
+    if run_len > 0 {
+        push_ctb_run(&mut out, run_len, run_value);
+    }
     out
 }
 
@@ -215,15 +234,25 @@ pub(super) fn ctb_layer_rle_xor(seed: u32, layer_index: u32, bytes: &mut [u8]) {
         .wrapping_add(0xec3d_47cd)
         .wrapping_mul(init);
 
-    let mut index = 0u32;
-    for b in bytes {
-        let k = (key >> (8 * index)) as u8;
-        index = index.wrapping_add(1);
-        if (index & 3) == 0 {
-            key = key.wrapping_add(init);
-            index = 0;
+    // Fast path: bulk process 4 bytes at a time
+    let mut chunks = bytes.chunks_exact_mut(4);
+    for chunk in &mut chunks {
+        // key is applied byte-by-byte in little-endian order: (key>>0), (key>>8), (key>>16), (key>>24)
+        let key_bytes = key.to_le_bytes();
+        chunk[0] ^= key_bytes[0];
+        chunk[1] ^= key_bytes[1];
+        chunk[2] ^= key_bytes[2];
+        chunk[3] ^= key_bytes[3];
+        key = key.wrapping_add(init);
+    }
+
+    // Handle remaining 1-3 bytes
+    let remainder = chunks.into_remainder();
+    if !remainder.is_empty() {
+        let key_bytes = key.to_le_bytes();
+        for (i, b) in remainder.iter_mut().enumerate() {
+            *b ^= key_bytes[i];
         }
-        *b ^= k;
     }
 }
 
