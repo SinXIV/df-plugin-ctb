@@ -106,15 +106,29 @@ fn resize_and_blend_rgba_to_rgb_nearest(
 
     let gradient_start = [32u32, 10u32, 42u32]; // dark dragonfruit purple
     let gradient_end = [14u32, 34u32, 14u32]; // dark dragonfruit green
+    let bayer4x4: [[i32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+    let dither_u8 = |v: u32, d: i32| -> u8 {
+        // Keep dithering subtle: enough to cross some RGB15 quantization boundaries,
+        // not enough to introduce visible speckle.
+        let dither_offset = (d - 8) * 3 / 8;
+        let with_dither = (v as i32 + dither_offset).clamp(0, 255);
+        with_dither as u8
+    };
 
     for y in 0..dst_h {
         let mut out_idx = ((y as usize) * (dst_w as usize)) * 3;
         for x in 0..dst_w {
+            let dither = bayer4x4[(y as usize) & 3][(x as usize) & 3];
             let denom = (dst_w_nz as u64 + dst_h_nz as u64).max(1);
             let t = ((x as u64 + y as u64) * 255 / denom) as u32;
             let bg_r = ((gradient_start[0] * (255 - t) + gradient_end[0] * t) / 255) as u32;
             let bg_g = ((gradient_start[1] * (255 - t) + gradient_end[1] * t) / 255) as u32;
             let bg_b = ((gradient_start[2] * (255 - t) + gradient_end[2] * t) / 255) as u32;
+
+            let bg_r8 = dither_u8(bg_r, dither);
+            let bg_g8 = dither_u8(bg_g, dither);
+            let bg_b8 = dither_u8(bg_b, dither);
 
             if x >= offset_x && x < offset_x + inner_w && y >= offset_y && y < offset_y + inner_h {
                 let local_x = x - offset_x;
@@ -137,19 +151,19 @@ fn resize_and_blend_rgba_to_rgb_nearest(
                     out[out_idx + 1] = g as u8;
                     out[out_idx + 2] = b as u8;
                 } else if a == 0 {
-                    out[out_idx] = bg_r as u8;
-                    out[out_idx + 1] = bg_g as u8;
-                    out[out_idx + 2] = bg_b as u8;
+                    out[out_idx] = bg_r8;
+                    out[out_idx + 1] = bg_g8;
+                    out[out_idx + 2] = bg_b8;
                 } else {
                     let inv_a = 255 - a;
-                    out[out_idx] = ((r * a + bg_r * inv_a) / 255) as u8;
-                    out[out_idx + 1] = ((g * a + bg_g * inv_a) / 255) as u8;
-                    out[out_idx + 2] = ((b * a + bg_b * inv_a) / 255) as u8;
+                    out[out_idx] = dither_u8((r * a + bg_r * inv_a) / 255, dither);
+                    out[out_idx + 1] = dither_u8((g * a + bg_g * inv_a) / 255, dither);
+                    out[out_idx + 2] = dither_u8((b * a + bg_b * inv_a) / 255, dither);
                 }
             } else {
-                out[out_idx] = bg_r as u8;
-                out[out_idx + 1] = bg_g as u8;
-                out[out_idx + 2] = bg_b as u8;
+                out[out_idx] = bg_r8;
+                out[out_idx + 1] = bg_g8;
+                out[out_idx + 2] = bg_b8;
             }
             out_idx += 3;
         }
@@ -267,4 +281,48 @@ pub(super) fn write_preview_record(
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resize_and_blend_rgba_to_rgb_nearest;
+
+    #[test]
+    fn resize_preserves_pixel_orientation() {
+        // 2x2 source (row-major):
+        // [red, green]
+        // [blue, white]
+        let src = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let out = resize_and_blend_rgba_to_rgb_nearest(2, 2, &src, 4, 4);
+
+        let px = |x: usize, y: usize| -> [u8; 3] {
+            let idx = (y * 4 + x) * 3;
+            [out[idx], out[idx + 1], out[idx + 2]]
+        };
+
+        assert_eq!(px(0, 0), [255, 0, 0]);
+        assert_eq!(px(3, 0), [0, 255, 0]);
+        assert_eq!(px(0, 3), [0, 0, 255]);
+        assert_eq!(px(3, 3), [255, 255, 255]);
+    }
+
+    #[test]
+    fn letterbox_uses_gradient_background() {
+        // Fully transparent source should reveal only the gradient background.
+        let src = vec![0, 0, 0, 0];
+        let out = resize_and_blend_rgba_to_rgb_nearest(1, 1, &src, 8, 8);
+
+        let top_left = [out[0], out[1], out[2]];
+        let bottom_right_idx = (7 * 8 + 7) * 3;
+        let bottom_right = [
+            out[bottom_right_idx],
+            out[bottom_right_idx + 1],
+            out[bottom_right_idx + 2],
+        ];
+
+        assert_ne!(top_left, bottom_right);
+    }
 }
