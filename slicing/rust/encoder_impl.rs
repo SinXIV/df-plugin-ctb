@@ -468,7 +468,7 @@ mod tests {
             container_compression_level: 2,
             anti_aliasing_level: "Off".to_string(),
             aa_on_supports: false,
-            minimum_aa_alpha_percent: 50.0,
+            minimum_aa_alpha_percent: 30.0,
             mirror_x: false,
             mirror_y: false,
             triangles_xyz: vec![],
