@@ -150,28 +150,68 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         wait_time_after_lift_sec: read_f32("waitTimeAfterLiftSec"),
     };
 
+    let sanitize_non_negative = |value: f32| {
+        if !value.is_finite() || value <= 0.0 {
+            0.0
+        } else {
+            value
+        }
+    };
+
+    timing.normal_exposure_sec = sanitize_non_negative(timing.normal_exposure_sec);
+    timing.bottom_exposure_sec = sanitize_non_negative(timing.bottom_exposure_sec);
+    timing.light_off_delay_sec = sanitize_non_negative(timing.light_off_delay_sec);
+    timing.bottom_light_off_delay_sec = sanitize_non_negative(timing.bottom_light_off_delay_sec);
+    timing.lift_distance_mm = sanitize_non_negative(timing.lift_distance_mm);
+    timing.lift_distance2_mm = sanitize_non_negative(timing.lift_distance2_mm);
+    timing.lift_speed_mm_min = sanitize_non_negative(timing.lift_speed_mm_min);
+    timing.lift_speed2_mm_min = sanitize_non_negative(timing.lift_speed2_mm_min);
+    timing.retract_distance_mm = sanitize_non_negative(timing.retract_distance_mm);
+    timing.retract_distance2_mm = sanitize_non_negative(timing.retract_distance2_mm);
+    timing.retract_speed_mm_min = sanitize_non_negative(timing.retract_speed_mm_min);
+    timing.retract_speed2_mm_min = sanitize_non_negative(timing.retract_speed2_mm_min);
+    timing.bottom_retract_speed_mm_min = sanitize_non_negative(timing.bottom_retract_speed_mm_min);
+    timing.bottom_retract_speed2_mm_min =
+        sanitize_non_negative(timing.bottom_retract_speed2_mm_min);
+    timing.bottom_retract_height2_mm = sanitize_non_negative(timing.bottom_retract_height2_mm);
+    timing.wait_time_before_cure_sec = sanitize_non_negative(timing.wait_time_before_cure_sec);
+    timing.wait_time_after_cure_sec = sanitize_non_negative(timing.wait_time_after_cure_sec);
+    timing.wait_time_after_lift_sec = sanitize_non_negative(timing.wait_time_after_lift_sec);
+
     if timing.lift_distance2_mm <= 0.0 {
-        timing.lift_distance2_mm = timing.lift_distance_mm.max(0.0);
+        timing.lift_distance2_mm = timing.lift_distance_mm;
     }
     if timing.lift_speed2_mm_min <= 0.0 {
-        timing.lift_speed2_mm_min = timing.lift_speed_mm_min.max(0.0);
+        timing.lift_speed2_mm_min = timing.lift_speed_mm_min;
     }
     if timing.retract_distance_mm <= 0.0 {
-        timing.retract_distance_mm = timing.lift_distance_mm.max(0.0);
+        timing.retract_distance_mm = timing.lift_distance_mm;
     }
     if timing.retract_distance2_mm <= 0.0 {
         timing.retract_distance2_mm = if timing.bottom_retract_height2_mm > 0.0 {
             timing.bottom_retract_height2_mm
         } else {
-            timing.retract_distance_mm.max(0.0)
+            timing.retract_distance_mm
         };
     }
     if timing.retract_speed2_mm_min <= 0.0 {
         timing.retract_speed2_mm_min = if timing.bottom_retract_speed2_mm_min > 0.0 {
             timing.bottom_retract_speed2_mm_min
+        } else if timing.bottom_retract_speed_mm_min > 0.0 {
+            timing.bottom_retract_speed_mm_min
         } else {
-            timing.retract_speed_mm_min.max(0.0)
+            timing.retract_speed_mm_min
         };
+    }
+
+    if timing.bottom_retract_speed_mm_min <= 0.0 {
+        timing.bottom_retract_speed_mm_min = timing.retract_speed_mm_min;
+    }
+    if timing.bottom_retract_speed2_mm_min <= 0.0 {
+        timing.bottom_retract_speed2_mm_min = timing.retract_speed2_mm_min;
+    }
+    if timing.bottom_retract_height2_mm <= 0.0 {
+        timing.bottom_retract_height2_mm = timing.retract_distance2_mm;
     }
 
     timing

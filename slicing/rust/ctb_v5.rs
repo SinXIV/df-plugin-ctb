@@ -21,7 +21,7 @@ use super::ctb_types::{
 };
 
 fn ctb_magic_for_version(version: u32) -> u32 {
-    if version == 4 {
+    if version >= 4 {
         CTB_MAGIC_V4_V5
     } else {
         CTB_MAGIC_V2_V3
@@ -260,6 +260,7 @@ fn write_layer_def(
     exposure_sec: f32,
     light_off_sec: f32,
     data_abs_offset: u64,
+    table_size: u32,
 ) {
     let (page_number, data_offset) = page_number_and_offset(data_abs_offset);
 
@@ -269,7 +270,7 @@ fn write_layer_def(
     push_u32(out, data_offset);
     push_u32(out, layer.encoded.len() as u32);
     push_u32(out, page_number);
-    push_u32(out, CTB_LAYER_DEF_SIZE);
+    push_u32(out, table_size);
     push_u32(out, 0);
     push_u32(out, 0);
 }
@@ -280,19 +281,34 @@ fn write_layer_def_ex(
     layer_def_bytes: &[u8],
     timing: CtbTimingModel,
 ) {
+    let clamp_non_negative = |value: f32| {
+        if !value.is_finite() || value <= 0.0 {
+            0.0
+        } else {
+            value
+        }
+    };
+
+    // Per-layer CTBv4/v5 semantics follow Chitubox/UVtools LayerDefEx:
+    // LiftHeight is total (stage1 + stage2), RetractHeight2 is stage2 retract distance.
+    let lift_height_1 = clamp_non_negative(timing.lift_distance_mm);
+    let lift_height_2 = clamp_non_negative(timing.lift_distance2_mm);
+    let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
+    let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
+
     out.extend_from_slice(layer_def_bytes);
     push_u32(out, CTB_LAYER_DEF_EX_SIZE + layer.encoded.len() as u32);
 
-    push_f32(out, timing.lift_distance_mm);
-    push_f32(out, timing.lift_speed_mm_min);
-    push_f32(out, 0.0);
-    push_f32(out, 0.0);
-    push_f32(out, timing.retract_speed_mm_min);
-    push_f32(out, 0.0);
-    push_f32(out, 0.0);
-    push_f32(out, timing.wait_time_after_cure_sec);
-    push_f32(out, timing.wait_time_after_lift_sec);
-    push_f32(out, timing.wait_time_before_cure_sec);
+    push_f32(out, lift_height_total);
+    push_f32(out, clamp_non_negative(timing.lift_speed_mm_min));
+    push_f32(out, lift_height_2);
+    push_f32(out, clamp_non_negative(timing.lift_speed2_mm_min));
+    push_f32(out, clamp_non_negative(timing.retract_speed_mm_min));
+    push_f32(out, retract_height_2);
+    push_f32(out, clamp_non_negative(timing.retract_speed2_mm_min));
+    push_f32(out, clamp_non_negative(timing.wait_time_after_cure_sec));
+    push_f32(out, clamp_non_negative(timing.wait_time_after_lift_sec));
+    push_f32(out, clamp_non_negative(timing.wait_time_before_cure_sec));
     push_f32(out, 255.0);
 }
 
@@ -385,8 +401,8 @@ pub(super) fn build_ctb_container_bytes_with_progress(
 
     let layers_definition_offset = offset;
 
-    let mut layer_defs_data = Vec::with_capacity(prepared.len() * CTB_LAYER_DEF_SIZE as usize);
-    let mut layer_ex_and_payload = Vec::new();
+    let mut layer_defs_data = Vec::with_capacity(prepared.len() * CTB_LAYER_DEF_EX_SIZE as usize);
+    let mut layer_payload_data = Vec::new();
 
     let magic = ctb_magic_for_version(build.version);
     let print_time_sec = compute_print_time_seconds(prepared.len(), timing);
@@ -407,7 +423,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         &build,
         preview_offsets.clone(),
         print_parameters_offset,
-        layers_definition_offset + layer_defs_data.len() as u32,
+        layers_definition_offset,
         print_time_sec,
         slicer_offset,
         slicer_size,
@@ -486,19 +502,23 @@ pub(super) fn build_ctb_container_bytes_with_progress(
 
     assert_eq!(out.len(), layers_definition_offset as usize);
 
+    let layer_def_record_size = CTB_LAYER_DEF_SIZE as usize;
+    let layer_defs_total_size = prepared.len() * layer_def_record_size;
+    let layer_data_start_abs = (layers_definition_offset as u64) + (layer_defs_total_size as u64);
+
     let total_prepared = prepared.len() as u32;
     for (idx, layer) in prepared.iter().enumerate() {
-        let layer_data_abs = (layers_definition_offset as u64)
-            + (layer_defs_data.len() as u64)
-            + if build.version >= 4 {
-                if build.version >= 5 {
-                    CTB_LAYER_DEF_EX_SIZE as u64
-                } else {
-                    CTB_LAYER_DEF_SIZE as u64
-                }
-            } else {
-                CTB_LAYER_DEF_SIZE as u64
-            };
+        let layer_data_blob_abs = layer_data_start_abs + (layer_payload_data.len() as u64);
+        let layer_data_abs = if build.version >= 3 {
+            layer_data_blob_abs + CTB_LAYER_DEF_EX_SIZE as u64
+        } else {
+            layer_data_blob_abs
+        };
+        let table_size = if build.version >= 3 {
+            CTB_LAYER_DEF_EX_SIZE
+        } else {
+            CTB_LAYER_DEF_SIZE
+        };
 
         let mut layer_def_bytes = Vec::new();
 
@@ -517,19 +537,18 @@ pub(super) fn build_ctb_container_bytes_with_progress(
                 timing.light_off_delay_sec
             },
             layer_data_abs,
+            table_size,
         );
 
-        if build.version >= 4 {
-            if build.version >= 5 {
-                write_layer_def_ex(&mut layer_ex_and_payload, layer, &layer_def_bytes, timing);
-            } else {
-                layer_defs_data.extend_from_slice(&layer_def_bytes);
-            }
-        } else {
-            layer_defs_data.extend_from_slice(&layer_def_bytes);
+        layer_defs_data.extend_from_slice(&layer_def_bytes);
+
+        if build.version >= 3 {
+            let mut layer_def_ex_bytes = Vec::with_capacity(CTB_LAYER_DEF_EX_SIZE as usize);
+            write_layer_def_ex(&mut layer_def_ex_bytes, layer, &layer_def_bytes, timing);
+            layer_payload_data.extend_from_slice(&layer_def_ex_bytes);
         }
 
-        layer_ex_and_payload.extend_from_slice(&layer.encoded);
+        layer_payload_data.extend_from_slice(&layer.encoded);
 
         if let Some(progress) = on_progress {
             progress((idx as u32) + 1, total_prepared.max(1));
@@ -537,7 +556,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
     }
 
     out.extend_from_slice(&layer_defs_data);
-    out.extend_from_slice(&layer_ex_and_payload);
+    out.extend_from_slice(&layer_payload_data);
 
     Ok(out)
 }

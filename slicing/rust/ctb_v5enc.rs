@@ -27,6 +27,18 @@ fn write_ctb_encrypted_layer_def(
     layer_data_abs_offset: u64,
 ) {
     let (page_number, layer_data_offset) = page_number_and_offset(layer_data_abs_offset);
+    let clamp_non_negative = |value: f32| {
+        if !value.is_finite() || value <= 0.0 {
+            0.0
+        } else {
+            value
+        }
+    };
+
+    let lift_height_1 = clamp_non_negative(timing.lift_distance_mm);
+    let lift_height_2 = clamp_non_negative(timing.lift_distance2_mm);
+    let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
+    let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
 
     push_u32(out, CTB_ENCRYPTED_LAYER_DEF_SIZE);
     push_f32(out, position_z_mm);
@@ -38,16 +50,16 @@ fn write_ctb_encrypted_layer_def(
     push_u32(out, 0);
     push_u32(out, 0);
     push_u32(out, 0);
-    push_f32(out, timing.lift_distance_mm);
-    push_f32(out, timing.lift_speed_mm_min);
-    push_f32(out, timing.retract_distance_mm);
-    push_f32(out, timing.retract_distance2_mm);
-    push_f32(out, timing.retract_speed_mm_min);
-    push_f32(out, timing.bottom_retract_height2_mm);
-    push_f32(out, timing.bottom_retract_speed2_mm_min);
-    push_f32(out, timing.wait_time_after_cure_sec);
-    push_f32(out, timing.wait_time_after_lift_sec);
-    push_f32(out, timing.wait_time_before_cure_sec);
+    push_f32(out, lift_height_total);
+    push_f32(out, clamp_non_negative(timing.lift_speed_mm_min));
+    push_f32(out, lift_height_2);
+    push_f32(out, clamp_non_negative(timing.lift_speed2_mm_min));
+    push_f32(out, clamp_non_negative(timing.retract_speed_mm_min));
+    push_f32(out, retract_height_2);
+    push_f32(out, clamp_non_negative(timing.retract_speed2_mm_min));
+    push_f32(out, clamp_non_negative(timing.wait_time_after_cure_sec));
+    push_f32(out, clamp_non_negative(timing.wait_time_after_lift_sec));
+    push_f32(out, clamp_non_negative(timing.wait_time_before_cure_sec));
     push_f32(out, 255.0);
     push_u32(out, 0);
 }

@@ -756,7 +756,7 @@ mod tests {
         let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         let encryption_key = u32::from_le_bytes(bytes[100..104].try_into().unwrap());
-        assert_eq!(magic, 0x12FD_0086);
+        assert_eq!(magic, 0x12FD_0106);
         assert_eq!(version, 5);
         assert_ne!(encryption_key, 0);
 
