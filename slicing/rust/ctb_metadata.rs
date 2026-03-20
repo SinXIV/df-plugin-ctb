@@ -14,6 +14,27 @@ fn parse_json(metadata_json: &str) -> Option<Value> {
     serde_json::from_str::<Value>(metadata_json).ok()
 }
 
+fn parse_ctb_format_version_hint(value: Option<&str>) -> Option<(u32, bool)> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let normalized: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+
+    match normalized.as_str() {
+        "2" | "v2" | "3" | "v3" | "v2v3" | "ctbv2v3" => Some((3, false)),
+        "4" | "v4" | "v4v5" | "ctbv4v5" => Some((4, false)),
+        "5" | "v5" => Some((5, false)),
+        "v5enc" | "v5encrypted" | "v5encryption" | "v5aes" | "ctbv5enc" => Some((5, true)),
+        _ => None,
+    }
+}
+
 pub(super) fn parse_threshold_from_metadata(metadata_json: &str) -> u8 {
     let Some(meta) = parse_json(metadata_json) else {
         return DEFAULT_BINARY_THRESHOLD;
@@ -151,6 +172,7 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
     let mut layer_xor_key = 0_u32;
     let mut projector_type = if job.mirror_x || job.mirror_y { 1 } else { 0 };
     let mut per_layer_settings = false;
+    let format_hint = parse_ctb_format_version_hint(job.format_version.as_deref());
 
     if let Some(meta) = parse_json(&job.metadata_json) {
         let version_direct = parse_u32_meta(&meta, "ctb", "version");
@@ -295,6 +317,10 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
 
     anti_alias_level = anti_alias_level.max(1);
 
+    if let Some((hint_version, _)) = format_hint {
+        version = hint_version.clamp(2, 5);
+    }
+
     CtbBuildModel {
         version,
         machine_name,
@@ -308,7 +334,10 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
     }
 }
 
-pub(super) fn parse_ctb_resin_model_from_job(job: &SliceJobV3, machine_name: &str) -> CtbResinModel {
+pub(super) fn parse_ctb_resin_model_from_job(
+    job: &SliceJobV3,
+    machine_name: &str,
+) -> CtbResinModel {
     let mut resin_name = DEFAULT_RESIN_NAME.to_string();
     let mut resin_type = DEFAULT_RESIN_TYPE.to_string();
     let mut resin_density = DEFAULT_RESIN_DENSITY;
@@ -405,9 +434,13 @@ pub(super) fn decode_embedded_disclaimer_bytes() -> Result<Vec<u8>, SlicerV3Erro
 }
 
 pub(super) fn parse_ctb_aes_model_from_job(job: &SliceJobV3) -> CtbAesModel {
+    let format_hint = parse_ctb_format_version_hint(job.format_version.as_deref());
+
     let Some(meta) = parse_json(&job.metadata_json) else {
         return CtbAesModel {
-            enabled: false,
+            enabled: format_hint
+                .map(|(_, is_encrypted)| is_encrypted)
+                .unwrap_or(false),
             key: None,
             iv: None,
         };
@@ -443,7 +476,10 @@ pub(super) fn parse_ctb_aes_model_from_job(job: &SliceJobV3) -> CtbAesModel {
             })
     };
 
-    let enabled = read_bool("enabled").unwrap_or(false);
+    let mut enabled = read_bool("enabled").unwrap_or(false);
+    if let Some((_, hinted_encryption)) = format_hint {
+        enabled = hinted_encryption;
+    }
     let key = read_str("keyBase64")
         .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok());
     let iv =

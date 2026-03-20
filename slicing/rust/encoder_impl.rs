@@ -462,6 +462,7 @@ mod tests {
     fn make_test_job() -> SliceJobV3 {
         SliceJobV3 {
             output_format: ".ctb".to_string(),
+            format_version: None,
             source_width_px: 4,
             source_height_px: 4,
             width_px: 4,
