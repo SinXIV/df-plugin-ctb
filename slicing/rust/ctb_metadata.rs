@@ -77,6 +77,10 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
             retract_distance2_mm: 0.0,
             retract_speed_mm_min: 0.0,
             retract_speed2_mm_min: 0.0,
+            bottom_lift_distance_mm: 0.0,
+            bottom_lift_distance2_mm: 0.0,
+            bottom_lift_speed_mm_min: 0.0,
+            bottom_lift_speed2_mm_min: 0.0,
             bottom_retract_speed_mm_min: 0.0,
             bottom_retract_speed2_mm_min: 0.0,
             bottom_retract_height2_mm: 0.0,
@@ -170,6 +174,10 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         retract_distance2_mm: read_f32("retractDistance2Mm"),
         retract_speed_mm_min: read_f32("retractSpeedMmMin"),
         retract_speed2_mm_min: read_f32("retractSpeed2MmMin"),
+        bottom_lift_distance_mm: read_f32("bottomLiftDistanceMm"),
+        bottom_lift_distance2_mm: read_f32("bottomLiftDistance2Mm"),
+        bottom_lift_speed_mm_min: read_f32("bottomLiftSpeedMmMin"),
+        bottom_lift_speed2_mm_min: read_f32("bottomLiftSpeed2MmMin"),
         bottom_retract_speed_mm_min: read_f32("bottomRetractSpeedMmMin"),
         bottom_retract_speed2_mm_min: read_f32("bottomRetractSpeed2MmMin"),
         bottom_retract_height2_mm: read_f32("bottomRetractHeight2Mm"),
@@ -199,6 +207,10 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
     timing.retract_distance2_mm = sanitize_non_negative(timing.retract_distance2_mm);
     timing.retract_speed_mm_min = sanitize_non_negative(timing.retract_speed_mm_min);
     timing.retract_speed2_mm_min = sanitize_non_negative(timing.retract_speed2_mm_min);
+    timing.bottom_lift_distance_mm = sanitize_non_negative(timing.bottom_lift_distance_mm);
+    timing.bottom_lift_distance2_mm = sanitize_non_negative(timing.bottom_lift_distance2_mm);
+    timing.bottom_lift_speed_mm_min = sanitize_non_negative(timing.bottom_lift_speed_mm_min);
+    timing.bottom_lift_speed2_mm_min = sanitize_non_negative(timing.bottom_lift_speed2_mm_min);
     timing.bottom_retract_speed_mm_min = sanitize_non_negative(timing.bottom_retract_speed_mm_min);
     timing.bottom_retract_speed2_mm_min =
         sanitize_non_negative(timing.bottom_retract_speed2_mm_min);
@@ -248,6 +260,11 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         timing.lift_speed2_mm_min = 0.0;
         timing.retract_distance2_mm = 0.0;
         timing.retract_speed2_mm_min = 0.0;
+        timing.bottom_lift_distance_mm = 0.0;
+        timing.bottom_lift_distance2_mm = 0.0;
+        timing.bottom_lift_speed_mm_min = 0.0;
+        timing.bottom_lift_speed2_mm_min = 0.0;
+        timing.bottom_retract_speed_mm_min = 0.0;
         timing.bottom_retract_speed2_mm_min = 0.0;
         timing.bottom_retract_height2_mm = 0.0;
     }

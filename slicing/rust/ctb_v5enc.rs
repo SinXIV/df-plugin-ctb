@@ -25,6 +25,7 @@ fn write_ctb_encrypted_layer_def(
     light_off_sec: f32,
     timing: CtbTimingModel,
     layer_data_abs_offset: u64,
+    is_bottom: bool,
 ) {
     let (page_number, layer_data_offset) = page_number_and_offset(layer_data_abs_offset);
     let clamp_non_negative = |value: f32| {
@@ -35,8 +36,40 @@ fn write_ctb_encrypted_layer_def(
         }
     };
 
-    let lift_height_1 = clamp_non_negative(timing.lift_distance_mm);
-    let lift_height_2 = clamp_non_negative(timing.lift_distance2_mm);
+    // Use bottom lift distance for bottom layers, normal for others
+    let lift_distance = if is_bottom {
+        timing.bottom_lift_distance_mm
+    } else {
+        timing.lift_distance_mm
+    };
+    let lift_distance2 = if is_bottom {
+        timing.bottom_lift_distance2_mm
+    } else {
+        timing.lift_distance2_mm
+    };
+    let lift_speed = if is_bottom {
+        timing.bottom_lift_speed_mm_min
+    } else {
+        timing.lift_speed_mm_min
+    };
+    let lift_speed2 = if is_bottom {
+        timing.bottom_lift_speed2_mm_min
+    } else {
+        timing.lift_speed2_mm_min
+    };
+    let retract_speed = if is_bottom {
+        timing.bottom_retract_speed_mm_min
+    } else {
+        timing.retract_speed_mm_min
+    };
+    let retract_speed2 = if is_bottom {
+        timing.bottom_retract_speed2_mm_min
+    } else {
+        timing.retract_speed2_mm_min
+    };
+
+    let lift_height_1 = clamp_non_negative(lift_distance);
+    let lift_height_2 = clamp_non_negative(lift_distance2);
     let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
     let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
 
@@ -51,12 +84,12 @@ fn write_ctb_encrypted_layer_def(
     push_u32(out, 0);
     push_u32(out, 0);
     push_f32(out, lift_height_total);
-    push_f32(out, clamp_non_negative(timing.lift_speed_mm_min));
+    push_f32(out, clamp_non_negative(lift_speed));
     push_f32(out, lift_height_2);
-    push_f32(out, clamp_non_negative(timing.lift_speed2_mm_min));
-    push_f32(out, clamp_non_negative(timing.retract_speed_mm_min));
+    push_f32(out, clamp_non_negative(lift_speed2));
+    push_f32(out, clamp_non_negative(retract_speed));
     push_f32(out, retract_height_2);
-    push_f32(out, clamp_non_negative(timing.retract_speed2_mm_min));
+    push_f32(out, clamp_non_negative(retract_speed2));
     push_f32(out, clamp_non_negative(timing.wait_time_after_cure_sec));
     push_f32(out, clamp_non_negative(timing.wait_time_after_lift_sec));
     push_f32(out, clamp_non_negative(timing.wait_time_before_cure_sec));
@@ -204,6 +237,7 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
             light_off,
             timing,
             layer_data_abs,
+            is_bottom,
         );
         out.extend_from_slice(&layer.encoded);
 

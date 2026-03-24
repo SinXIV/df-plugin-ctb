@@ -280,6 +280,7 @@ fn write_layer_def_ex(
     layer: &CtbPreparedLayer,
     layer_def_bytes: &[u8],
     timing: CtbTimingModel,
+    is_bottom: bool,
 ) {
     let clamp_non_negative = |value: f32| {
         if !value.is_finite() || value <= 0.0 {
@@ -289,10 +290,42 @@ fn write_layer_def_ex(
         }
     };
 
+    // Use bottom lift distance for bottom layers, normal for others
+    let lift_distance = if is_bottom {
+        timing.bottom_lift_distance_mm
+    } else {
+        timing.lift_distance_mm
+    };
+    let lift_distance2 = if is_bottom {
+        timing.bottom_lift_distance2_mm
+    } else {
+        timing.lift_distance2_mm
+    };
+    let lift_speed = if is_bottom {
+        timing.bottom_lift_speed_mm_min
+    } else {
+        timing.lift_speed_mm_min
+    };
+    let lift_speed2 = if is_bottom {
+        timing.bottom_lift_speed2_mm_min
+    } else {
+        timing.lift_speed2_mm_min
+    };
+    let retract_speed = if is_bottom {
+        timing.bottom_retract_speed_mm_min
+    } else {
+        timing.retract_speed_mm_min
+    };
+    let retract_speed2 = if is_bottom {
+        timing.bottom_retract_speed2_mm_min
+    } else {
+        timing.retract_speed2_mm_min
+    };
+
     // Per-layer CTBv4/v5 semantics follow Chitubox/UVtools LayerDefEx:
     // LiftHeight is total (stage1 + stage2), RetractHeight2 is stage2 retract distance.
-    let lift_height_1 = clamp_non_negative(timing.lift_distance_mm);
-    let lift_height_2 = clamp_non_negative(timing.lift_distance2_mm);
+    let lift_height_1 = clamp_non_negative(lift_distance);
+    let lift_height_2 = clamp_non_negative(lift_distance2);
     let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
     let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
 
@@ -300,12 +333,12 @@ fn write_layer_def_ex(
     push_u32(out, CTB_LAYER_DEF_EX_SIZE + layer.encoded.len() as u32);
 
     push_f32(out, lift_height_total);
-    push_f32(out, clamp_non_negative(timing.lift_speed_mm_min));
+    push_f32(out, clamp_non_negative(lift_speed));
     push_f32(out, lift_height_2);
-    push_f32(out, clamp_non_negative(timing.lift_speed2_mm_min));
-    push_f32(out, clamp_non_negative(timing.retract_speed_mm_min));
+    push_f32(out, clamp_non_negative(lift_speed2));
+    push_f32(out, clamp_non_negative(retract_speed));
     push_f32(out, retract_height_2);
-    push_f32(out, clamp_non_negative(timing.retract_speed2_mm_min));
+    push_f32(out, clamp_non_negative(retract_speed2));
     push_f32(out, clamp_non_negative(timing.wait_time_after_cure_sec));
     push_f32(out, clamp_non_negative(timing.wait_time_after_lift_sec));
     push_f32(out, clamp_non_negative(timing.wait_time_before_cure_sec));
@@ -544,7 +577,14 @@ pub(super) fn build_ctb_container_bytes_with_progress(
 
         if build.version >= 3 {
             let mut layer_def_ex_bytes = Vec::with_capacity(CTB_LAYER_DEF_EX_SIZE as usize);
-            write_layer_def_ex(&mut layer_def_ex_bytes, layer, &layer_def_bytes, timing);
+            let is_bottom = (layer.index as u32) < timing.bottom_layer_count;
+            write_layer_def_ex(
+                &mut layer_def_ex_bytes,
+                layer,
+                &layer_def_bytes,
+                timing,
+                is_bottom,
+            );
             layer_payload_data.extend_from_slice(&layer_def_ex_bytes);
         }
 

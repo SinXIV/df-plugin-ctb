@@ -7,12 +7,14 @@
   "sections": [
     { "id": "burn-in", "title": "Burn In Layers", "tabId": "simple", "order": 10 },
     { "id": "normal", "title": "Normal Layers", "tabId": "simple", "order": 20 },
-    { "id": "timing", "title": "Timing", "tabId": "simple", "order": 30 }
+    { "id": "timing", "title": "Timing", "tabId": "simple", "order": 30 },
+    { "id": "light", "title": "Light Settings", "tabId": "simple", "order": 40 }
   ],
   "cards": [
     { "id": "burn-in-settings", "title": "Burn In Layers", "tabId": "simple", "sectionId": "burn-in", "order": 10 },
     { "id": "normal-settings", "title": "Normal Layers", "tabId": "simple", "sectionId": "normal", "order": 20 },
-    { "id": "timing-settings", "title": "Timing", "tabId": "simple", "sectionId": "timing", "order": 30 }
+    { "id": "timing-settings", "title": "Timing", "tabId": "simple", "sectionId": "timing", "order": 30 },
+    { "id": "light-settings", "title": "Light Settings", "tabId": "simple", "sectionId": "light", "order": 40 }
   ],
   "fields": [
     {
@@ -41,7 +43,7 @@
       "key": "bottomExposureSec",
       "label": "Burn-in Exposure (s)",
       "kind": "number",
-      "defaultValue": 28,
+      "defaultValue": 25,
       "min": 0,
       "max": 300,
       "step": 0.1,
@@ -52,7 +54,7 @@
       "key": "normalExposureSec",
       "label": "Normal Exposure (s)",
       "kind": "number",
-      "defaultValue": 2.5,
+      "defaultValue": 2,
       "min": 0,
       "max": 120,
       "step": 0.01,
@@ -96,7 +98,7 @@
       "key": "lightOffDelaySec",
       "label": "Light-off Delay (s)",
       "kind": "number",
-      "defaultValue": 0,
+      "defaultValue": 1,
       "min": 0,
       "max": 120,
       "step": 0.01,
@@ -118,7 +120,7 @@
       "key": "transitionLayerCount",
       "label": "Transition Layers",
       "kind": "integer",
-      "defaultValue": 0,
+      "defaultValue": 5,
       "min": 0,
       "max": 100000,
       "step": 1,
@@ -157,6 +159,28 @@
       "step": 0.01,
       "placement": { "tabId": "simple", "sectionId": "timing", "cardId": "timing-settings", "order": 60 },
       "metadataPath": "ctb.waitTimeAfterLiftSec"
+    },
+    {
+      "key": "projectorPwmPercent",
+      "label": "Projector PWM (%)",
+      "kind": "number",
+      "defaultValue": 100,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "placement": { "tabId": "simple", "sectionId": "light", "cardId": "light-settings", "order": 70 },
+      "metadataPath": "ctb.projectorPwmPercent"
+    },
+    {
+      "key": "minimumAaAlphaPercent",
+      "label": "Minimum AA Alpha (%)",
+      "kind": "number",
+      "defaultValue": 35,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "placement": { "tabId": "simple", "sectionId": "light", "cardId": "light-settings", "order": 80 },
+      "metadataPath": "dragonFruit.minimumAaAlphaPercent"
     }
   ]
 }
