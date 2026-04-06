@@ -1,6 +1,6 @@
 use crate::engine::SlicerV3Error;
 use aes::cipher::block_padding::NoPadding;
-use aes::cipher::{BlockEncryptMut, KeyIvInit};
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use aes::Aes256;
 
 const CTB_AES_OBFUSCATION: &[u8; 14] = b"DragonFruitFTW";
@@ -51,6 +51,33 @@ pub(super) fn ctb_encrypt_in_place_no_padding(
         .map_err(|e| {
             SlicerV3Error::UnsupportedOutput(format!(
                 "CTB AES encryption failed for fixed-size block: {e}"
+            ))
+        })?;
+
+    Ok(())
+}
+
+pub(super) fn ctb_decrypt_in_place_no_padding(
+    bytes: &mut [u8],
+    key: &[u8; 32],
+    iv: &[u8; 16],
+) -> Result<(), SlicerV3Error> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    if bytes.len() % 16 != 0 {
+        return Err(SlicerV3Error::UnsupportedOutput(format!(
+            "CTB AES no-padding block must be multiple of 16 bytes, got {} bytes",
+            bytes.len()
+        )));
+    }
+
+    cbc::Decryptor::<Aes256>::new(key.into(), iv.into())
+        .decrypt_padded_mut::<NoPadding>(bytes)
+        .map_err(|e| {
+            SlicerV3Error::UnsupportedOutput(format!(
+                "CTB AES decryption failed for fixed-size block: {e}"
             ))
         })?;
 

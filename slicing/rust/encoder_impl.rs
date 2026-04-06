@@ -585,6 +585,288 @@ impl FormatEncoder for CtbPluginEncoder {
     }
 }
 
+/// Reads a single layer preview PNG from a CTB binary file.
+/// `layer_number` is 1-based. Supports non-encrypted CTB V2–V5 and encrypted V5.
+pub fn read_layer_preview_png(path: &Path, layer_number: u32) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    if layer_number == 0 {
+        return Err("Layer number must be >= 1".to_string());
+    }
+
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Failed opening CTB file: {e}"))?;
+
+    let mut magic_bytes = [0u8; 4];
+    file.read_exact(&mut magic_bytes)
+        .map_err(|e| format!("CTB magic read failed: {e}"))?;
+    let magic = u32::from_le_bytes(magic_bytes);
+
+    if magic == ctb_types::CTB_MAGIC_V5_ENCRYPTED {
+        read_encrypted_layer_preview(&mut file, layer_number)
+    } else {
+        read_plain_layer_preview(&mut file, layer_number)
+    }
+}
+
+/// Reads a layer preview from a non-encrypted CTB file (V2–V5).
+fn read_plain_layer_preview(
+    file: &mut std::fs::File,
+    layer_number: u32,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // Re-read the full 112-byte header from the start.
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("CTB header seek failed: {e}"))?;
+
+    let mut header = [0u8; ctb_types::CTB_HEADER_SIZE as usize];
+    file.read_exact(&mut header)
+        .map_err(|e| format!("CTB header read failed: {e}"))?;
+
+    let width_px = u32::from_le_bytes(header[52..56].try_into().unwrap());
+    let height_px = u32::from_le_bytes(header[56..60].try_into().unwrap());
+    let layers_def_off = u32::from_le_bytes(header[64..68].try_into().unwrap());
+    let layer_count = u32::from_le_bytes(header[68..72].try_into().unwrap());
+    let xor_key = u32::from_le_bytes(header[100..104].try_into().unwrap());
+
+    if width_px == 0 || height_px == 0 {
+        return Err(format!(
+            "CTB file reports invalid dimensions {width_px}×{height_px}"
+        ));
+    }
+    if layer_number > layer_count {
+        return Err(format!(
+            "Layer {layer_number} out of range (file has {layer_count} layers)"
+        ));
+    }
+
+    let layer_index = layer_number - 1;
+
+    // Read layer def record (36 bytes each).
+    let def_offset =
+        layers_def_off as u64 + layer_index as u64 * ctb_types::CTB_LAYER_DEF_SIZE as u64;
+    file.seek(SeekFrom::Start(def_offset))
+        .map_err(|e| format!("CTB layer def seek failed: {e}"))?;
+
+    let mut layer_def = [0u8; ctb_types::CTB_LAYER_DEF_SIZE as usize];
+    file.read_exact(&mut layer_def)
+        .map_err(|e| format!("CTB layer def read failed: {e}"))?;
+
+    // Plain layer def v4/v5 layout:
+    //   [0..4]   position_z_mm
+    //   [4..8]   exposure_sec
+    //   [8..12]  light_off_sec
+    //   [12..16] page-relative data offset
+    //   [16..20] encoded data size
+    //   [20..24] page number
+    //   [24..28] table_size
+    //   [28..32] 0
+    //   [32..36] 0
+    let data_page_rel = u32::from_le_bytes(layer_def[12..16].try_into().unwrap());
+    let encoded_len = u32::from_le_bytes(layer_def[16..20].try_into().unwrap());
+    let page_number = u32::from_le_bytes(layer_def[20..24].try_into().unwrap());
+
+    let abs_data = page_number as u64 * ctb_types::CTB_PAGE_SIZE + data_page_rel as u64;
+    file.seek(SeekFrom::Start(abs_data))
+        .map_err(|e| format!("CTB layer data seek failed: {e}"))?;
+
+    let mut rle_bytes = vec![0u8; encoded_len as usize];
+    file.read_exact(&mut rle_bytes)
+        .map_err(|e| format!("CTB layer RLE read failed: {e}"))?;
+
+    ctb_layout::ctb_layer_rle_xor(xor_key, layer_index, &mut rle_bytes);
+
+    let expected_pixels = width_px as usize * height_px as usize;
+    let pixels = decode_ctb_rle(&rle_bytes, expected_pixels);
+    encode_pixels_as_grayscale_png(width_px, height_px, &pixels)
+}
+
+/// Reads a layer preview from an encrypted CTB V5 file.
+fn read_encrypted_layer_preview(
+    file: &mut std::fs::File,
+    layer_number: u32,
+) -> Result<Vec<u8>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // Decrypt the settings block to obtain layout parameters.
+    file.seek(SeekFrom::Start(
+        ctb_types::CTB_ENCRYPTED_SETTINGS_OFFSET as u64,
+    ))
+    .map_err(|e| format!("CTB encrypted settings seek failed: {e}"))?;
+
+    let mut settings = vec![0u8; ctb_types::CTB_ENCRYPTED_SETTINGS_SIZE as usize];
+    file.read_exact(&mut settings)
+        .map_err(|e| format!("CTB encrypted settings read failed: {e}"))?;
+
+    let (key, iv) = ctb_crypto::ctb_default_key_iv();
+    ctb_crypto::ctb_decrypt_in_place_no_padding(&mut settings, &key, &iv)
+        .map_err(|e| format!("CTB settings AES decrypt failed: {e}"))?;
+
+    // Decrypted settings field layout (see ctb_v5enc.rs for the write-side reference):
+    //   [0..8]     checksum (u64)
+    //   [8..12]    layer_pointers_offset (u32)
+    //   [56..60]   source_width_px (u32)
+    //   [60..64]   source_height_px (u32)
+    //   [64..68]   layer_count (u32)
+    //   [128..132] layer_xor_key (u32)
+    let layer_pointers_off = u32::from_le_bytes(settings[8..12].try_into().unwrap());
+    let width_px = u32::from_le_bytes(settings[56..60].try_into().unwrap());
+    let height_px = u32::from_le_bytes(settings[60..64].try_into().unwrap());
+    let layer_count = u32::from_le_bytes(settings[64..68].try_into().unwrap());
+    let xor_key = u32::from_le_bytes(settings[128..132].try_into().unwrap());
+
+    if width_px == 0 || height_px == 0 {
+        return Err(format!(
+            "CTB encrypted file reports invalid dimensions {width_px}×{height_px}"
+        ));
+    }
+    if layer_number > layer_count {
+        return Err(format!(
+            "Layer {layer_number} out of range (file has {layer_count} layers)"
+        ));
+    }
+
+    let layer_index = layer_number - 1;
+
+    // Each pointer table entry is 16 bytes:
+    //   [0..4]   page-relative layer def offset
+    //   [4..8]   page number of layer def
+    //   [8..12]  def size (CTB_ENCRYPTED_LAYER_DEF_SIZE)
+    //   [12..16] 0
+    let ptr_entry_off = layer_pointers_off as u64 + layer_index as u64 * 16;
+    file.seek(SeekFrom::Start(ptr_entry_off))
+        .map_err(|e| format!("CTB pointer table seek failed: {e}"))?;
+
+    let mut pointer = [0u8; 16];
+    file.read_exact(&mut pointer)
+        .map_err(|e| format!("CTB pointer table read failed: {e}"))?;
+
+    let def_page_rel = u32::from_le_bytes(pointer[0..4].try_into().unwrap());
+    let def_page = u32::from_le_bytes(pointer[4..8].try_into().unwrap());
+    let abs_def = def_page as u64 * ctb_types::CTB_PAGE_SIZE + def_page_rel as u64;
+
+    file.seek(SeekFrom::Start(abs_def))
+        .map_err(|e| format!("CTB encrypted layer def seek failed: {e}"))?;
+
+    // Encrypted layer def is 88 bytes. Layout:
+    //   [0..4]   table_size (CTB_ENCRYPTED_LAYER_DEF_SIZE = 88)
+    //   [4..8]   position_z_mm
+    //   [8..12]  exposure_sec
+    //   [12..16] light_off_sec
+    //   [16..20] page-relative data offset
+    //   [20..24] page number of data
+    //   [24..28] encoded data size in bytes
+    //   ... (timing fields, not needed for preview)
+    let mut layer_def = [0u8; ctb_types::CTB_ENCRYPTED_LAYER_DEF_SIZE as usize];
+    file.read_exact(&mut layer_def)
+        .map_err(|e| format!("CTB encrypted layer def read failed: {e}"))?;
+
+    let data_page_rel = u32::from_le_bytes(layer_def[16..20].try_into().unwrap());
+    let data_page = u32::from_le_bytes(layer_def[20..24].try_into().unwrap());
+    let encoded_len = u32::from_le_bytes(layer_def[24..28].try_into().unwrap());
+    let abs_data = data_page as u64 * ctb_types::CTB_PAGE_SIZE + data_page_rel as u64;
+
+    file.seek(SeekFrom::Start(abs_data))
+        .map_err(|e| format!("CTB encrypted layer data seek failed: {e}"))?;
+
+    let mut rle_bytes = vec![0u8; encoded_len as usize];
+    file.read_exact(&mut rle_bytes)
+        .map_err(|e| format!("CTB encrypted layer RLE read failed: {e}"))?;
+
+    ctb_layout::ctb_layer_rle_xor(xor_key, layer_index, &mut rle_bytes);
+
+    let expected_pixels = width_px as usize * height_px as usize;
+    let pixels = decode_ctb_rle(&rle_bytes, expected_pixels);
+    encode_pixels_as_grayscale_png(width_px, height_px, &pixels)
+}
+
+/// Decodes CTB run-length encoded data into a flat grayscale pixel buffer.
+fn decode_ctb_rle(data: &[u8], expected_pixels: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(expected_pixels);
+    let mut i = 0;
+
+    while i < data.len() && pixels.len() < expected_pixels {
+        let code = data[i];
+        i += 1;
+        // Low 7 bits hold (pixel_value >> 1); high bit signals a length field follows.
+        let pixel = (code & 0x7f) << 1;
+        let has_len = (code & 0x80) != 0;
+
+        let run_len: u32 = if !has_len {
+            1
+        } else if i >= data.len() {
+            break;
+        } else {
+            let b0 = data[i];
+            i += 1;
+            if b0 & 0x80 == 0 {
+                // 1-byte length: 0x00..0x7F
+                b0 as u32
+            } else if b0 & 0xc0 == 0x80 {
+                // 2-byte length: 0x80..0xBF
+                if i >= data.len() {
+                    break;
+                }
+                let b1 = data[i];
+                i += 1;
+                ((b0 as u32 & 0x7f) << 8) | b1 as u32
+            } else if b0 & 0xe0 == 0xc0 {
+                // 3-byte length: 0xC0..0xDF
+                if i + 1 > data.len() {
+                    break;
+                }
+                let b1 = data[i];
+                i += 1;
+                let b2 = data[i];
+                i += 1;
+                ((b0 as u32 & 0x3f) << 16) | ((b1 as u32) << 8) | b2 as u32
+            } else {
+                // 4-byte length: 0xE0..0xFF
+                if i + 2 > data.len() {
+                    break;
+                }
+                let b1 = data[i];
+                i += 1;
+                let b2 = data[i];
+                i += 1;
+                let b3 = data[i];
+                i += 1;
+                ((b0 as u32 & 0x1f) << 24) | ((b1 as u32) << 16) | ((b2 as u32) << 8) | b3 as u32
+            }
+        };
+
+        let remaining = expected_pixels - pixels.len();
+        let fill = (run_len as usize).min(remaining);
+        for _ in 0..fill {
+            pixels.push(pixel);
+        }
+    }
+
+    pixels.resize(expected_pixels, 0);
+    pixels
+}
+
+/// Encodes a flat grayscale pixel buffer as an 8-bit grayscale PNG.
+fn encode_pixels_as_grayscale_png(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, width, height);
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("CTB PNG header write failed: {e}"))?;
+    writer
+        .write_image_data(pixels)
+        .map_err(|e| format!("CTB PNG data write failed: {e}"))?;
+    drop(writer);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::ctb_metadata::parse_timing_model_from_metadata;
