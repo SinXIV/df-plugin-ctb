@@ -20,6 +20,7 @@ use ctb_layout::{
 use ctb_metadata::{parse_ctb_build_model_from_job, parse_threshold_from_metadata};
 use std::path::Path;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 #[cfg(test)]
@@ -252,6 +253,55 @@ impl RleStreamEncoder for CtbRleStreamingEncoder {
         }
         self.prepared.sort_unstable_by_key(|p| p.index);
         build_ctb_container_bytes(&self.job, &self.prepared)
+    }
+
+    fn parallel_encode_fn(
+        &self,
+    ) -> Option<
+        Arc<dyn Fn(u32, &[crate::rle::RleRun]) -> Result<Vec<u8>, SlicerV3Error> + Send + Sync>,
+    > {
+        let layer_xor_key = self.layer_xor_key;
+        let is_anti_aliased = self.is_anti_aliased;
+        let threshold = self.threshold;
+        let total_pixels = self.total_pixels;
+
+        Some(Arc::new(
+            move |layer_index: u32, runs: &[crate::rle::RleRun]| {
+                let mut encoded = Vec::with_capacity(32 * 1024);
+
+                if runs.is_empty() {
+                    ctb_layout::push_ctb_run(
+                        &mut encoded,
+                        total_pixels.min(u32::MAX as usize) as u32,
+                        0,
+                    );
+                } else {
+                    for run in runs {
+                        let value = if is_anti_aliased {
+                            run.value
+                        } else {
+                            if run.value > threshold {
+                                255
+                            } else {
+                                0
+                            }
+                        };
+                        ctb_layout::push_ctb_run(&mut encoded, run.length, value);
+                    }
+                }
+
+                ctb_layout::ctb_layer_rle_xor(layer_xor_key, layer_index, &mut encoded);
+                Ok(encoded)
+            },
+        ))
+    }
+
+    fn store_encoded_layer(&mut self, layer_index: u32, bytes: Vec<u8>) {
+        self.prepared.push(ctb_types::CtbPreparedLayer {
+            index: layer_index as usize,
+            source_len: self.total_pixels,
+            encoded: bytes,
+        });
     }
 }
 
