@@ -225,7 +225,11 @@ impl RleStreamEncoder for CtbRleStreamingEncoder {
                 } else {
                     // Apply threshold: rasterizer may produce intermediate values
                     // in degenerate cases; snap to binary for non-AA CTB output.
-                    if run.value > self.threshold { 255 } else { 0 }
+                    if run.value > self.threshold {
+                        255
+                    } else {
+                        0
+                    }
                 };
                 ctb_layout::push_ctb_run(&mut encoded, run.length, value);
             }
@@ -564,6 +568,7 @@ mod tests {
             mirror_y: false,
             triangles_xyz: vec![],
             metadata_json: "{}".to_string(),
+            x_packing_mode: "none".to_string(),
         }
     }
 
