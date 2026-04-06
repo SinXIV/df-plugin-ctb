@@ -8,6 +8,7 @@ mod ctb_v5enc;
 
 use crate::encoders::FormatEncoder;
 use crate::encoders::RawMaskStreamEncoder;
+use crate::encoders::RleStreamEncoder;
 use crate::engine::SlicerV3Error;
 use crate::types::{LayerAreaStatsV3, RenderedLayersV3, SliceJobV3};
 use crossbeam_channel::bounded;
@@ -190,6 +191,66 @@ impl RawMaskStreamEncoder for CtbRawMaskStreamingEncoder {
     }
 }
 
+/// Sequential RLE streaming encoder: receives `Vec<RleRun>` per layer (already
+/// rasterized by `rasterize_layer_rle`), converts directly to CTB RLE, and
+/// assembles the container in `finalize_to_bytes` — zero pixel-buffer overhead.
+struct CtbRleStreamingEncoder {
+    job: SliceJobV3,
+    layer_xor_key: u32,
+    is_anti_aliased: bool,
+    threshold: u8,
+    total_pixels: usize,
+    prepared: Vec<ctb_types::CtbPreparedLayer>,
+}
+
+impl RleStreamEncoder for CtbRleStreamingEncoder {
+    fn consume_rle_layer(
+        &mut self,
+        layer_index: u32,
+        runs: Vec<crate::rle::RleRun>,
+    ) -> Result<(), SlicerV3Error> {
+        let mut encoded = Vec::with_capacity(32 * 1024);
+
+        if runs.is_empty() {
+            // All-black layer: single zero run.
+            ctb_layout::push_ctb_run(
+                &mut encoded,
+                self.total_pixels.min(u32::MAX as usize) as u32,
+                0,
+            );
+        } else {
+            for run in &runs {
+                let value = if self.is_anti_aliased {
+                    run.value
+                } else {
+                    // Apply threshold: rasterizer may produce intermediate values
+                    // in degenerate cases; snap to binary for non-AA CTB output.
+                    if run.value > self.threshold { 255 } else { 0 }
+                };
+                ctb_layout::push_ctb_run(&mut encoded, run.length, value);
+            }
+        }
+
+        ctb_layout::ctb_layer_rle_xor(self.layer_xor_key, layer_index, &mut encoded);
+        self.prepared.push(ctb_types::CtbPreparedLayer {
+            index: layer_index as usize,
+            source_len: self.total_pixels,
+            encoded,
+        });
+        Ok(())
+    }
+
+    fn finalize_to_bytes(mut self: Box<Self>) -> Result<Vec<u8>, SlicerV3Error> {
+        if self.prepared.is_empty() {
+            return Err(SlicerV3Error::MissingRenderedLayerPayload(
+                "no rendered layers were provided for CTB RLE encoding".to_string(),
+            ));
+        }
+        self.prepared.sort_unstable_by_key(|p| p.index);
+        build_ctb_container_bytes(&self.job, &self.prepared)
+    }
+}
+
 pub fn create_plugin_encoder() -> Vec<Box<dyn FormatEncoder>> {
     vec![Box::new(CtbPluginEncoder)]
 }
@@ -291,6 +352,25 @@ impl FormatEncoder for CtbPluginEncoder {
             result_rx,
             workers,
             consumed_layers: 0,
+        })))
+    }
+
+    fn create_rle_stream_encoder(
+        &self,
+        job: &SliceJobV3,
+    ) -> Result<Option<Box<dyn RleStreamEncoder>>, SlicerV3Error> {
+        let build = parse_ctb_build_model_from_job(job);
+        let threshold = parse_threshold_from_metadata(&job.metadata_json);
+        let is_anti_aliased = job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
+        let total_pixels =
+            (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
+        Ok(Some(Box::new(CtbRleStreamingEncoder {
+            job: job.clone(),
+            layer_xor_key: build.layer_xor_key,
+            is_anti_aliased,
+            threshold,
+            total_pixels,
+            prepared: Vec::with_capacity(job.total_layers as usize),
         })))
     }
 
