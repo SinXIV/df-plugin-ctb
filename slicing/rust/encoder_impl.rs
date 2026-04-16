@@ -583,6 +583,14 @@ impl FormatEncoder for CtbPluginEncoder {
         std::fs::write(output_path, bytes)?;
         Ok(())
     }
+
+    fn read_layer_preview_png(
+        &self,
+        path: &Path,
+        layer_number: u32,
+    ) -> Result<Vec<u8>, SlicerV3Error> {
+        self::read_layer_preview_png(path, layer_number).map_err(SlicerV3Error::LayerPreview)
+    }
 }
 
 /// Reads a single layer preview PNG from a CTB binary file.
