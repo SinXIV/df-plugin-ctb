@@ -76,6 +76,50 @@ fn decode_png_rgba8(png_bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), SlicerV3Err
     Ok((info.width, info.height, out))
 }
 
+/// Trims fully-transparent rows and columns from an RGBA image, returning the
+/// cropped subimage and its new dimensions. Adds a small proportional margin
+/// (5 % of the tighter cropped extent on each side) so the subject never bleeds
+/// right to the edge. If the image has no opaque pixels the original is returned.
+fn crop_transparent_border(w: u32, h: u32, rgba: &[u8]) -> (u32, u32, Vec<u8>) {
+    if rgba.is_empty() || w == 0 || h == 0 {
+        return (w, h, rgba.to_vec());
+    }
+
+    let pixel_alpha = |x: u32, y: u32| -> u8 { rgba[((y * w + x) as usize) * 4 + 3] };
+
+    let min_x = (0..w).find(|&x| (0..h).any(|y| pixel_alpha(x, y) > 0));
+    let max_x = (0..w)
+        .rev()
+        .find(|&x| (0..h).any(|y| pixel_alpha(x, y) > 0));
+    let min_y = (0..h).find(|&y| (0..w).any(|x| pixel_alpha(x, y) > 0));
+    let max_y = (0..h)
+        .rev()
+        .find(|&y| (0..w).any(|x| pixel_alpha(x, y) > 0));
+
+    let (Some(min_x), Some(max_x), Some(min_y), Some(max_y)) = (min_x, max_x, min_y, max_y) else {
+        return (w, h, rgba.to_vec());
+    };
+
+    let crop_w = max_x - min_x + 1;
+    let crop_h = max_y - min_y + 1;
+
+    // Add a 5% margin on each side of the tightest crop extent.
+    let margin = ((crop_w.min(crop_h) as f32) * 0.05).round() as u32;
+    let x0 = min_x.saturating_sub(margin);
+    let y0 = min_y.saturating_sub(margin);
+    let x1 = (max_x + margin + 1).min(w);
+    let y1 = (max_y + margin + 1).min(h);
+
+    let out_w = x1 - x0;
+    let out_h = y1 - y0;
+    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for y in y0..y1 {
+        let row_start = ((y * w + x0) as usize) * 4;
+        out.extend_from_slice(&rgba[row_start..row_start + (out_w as usize) * 4]);
+    }
+    (out_w, out_h, out)
+}
+
 fn resize_and_blend_rgba_to_rgb_nearest(
     src_w: u32,
     src_h: u32,
@@ -83,6 +127,8 @@ fn resize_and_blend_rgba_to_rgb_nearest(
     dst_w: u32,
     dst_h: u32,
 ) -> Vec<u8> {
+    let (src_w, src_h, cropped) = crop_transparent_border(src_w, src_h, src_rgba);
+    let src_rgba = &cropped;
     let mut out = vec![0u8; (dst_w as usize) * (dst_h as usize) * 3];
 
     let src_w_nz = src_w.max(1);
