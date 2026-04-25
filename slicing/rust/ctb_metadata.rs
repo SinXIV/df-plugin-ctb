@@ -474,13 +474,65 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
             .map(|v| v as u32);
         projector_type = proj_direct.or(proj_nested).unwrap_or(projector_type);
 
+        let settings_mode = meta
+            .get("ctb")
+            .and_then(Value::as_object)
+            .and_then(|m| m.get("settingsMode").or_else(|| m.get("mode")))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                meta.get("export")
+                    .and_then(|v| v.get("ctb"))
+                    .and_then(Value::as_object)
+                    .and_then(|m| m.get("settingsMode").or_else(|| m.get("mode")))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                meta.get("printer")
+                    .and_then(Value::as_object)
+                    .and_then(|m| m.get("settingsMode").or_else(|| m.get("mode")))
+                    .and_then(Value::as_str)
+            })
+            .map(|v| v.trim().to_ascii_lowercase());
+
+        let ctb_root = meta.get("ctb").and_then(Value::as_object);
+        let export_ctb_root = meta
+            .get("export")
+            .and_then(|v| v.get("ctb"))
+            .and_then(Value::as_object);
+
+        let read_positive_f32 =
+            |root: Option<&serde_json::Map<String, Value>>, key: &str| -> bool {
+                root.and_then(|m| m.get(key))
+                    .and_then(Value::as_f64)
+                    .map(|v| v > 0.0)
+                    .unwrap_or(false)
+            };
+
+        let has_explicit_two_stage_motion = [
+            "liftDistance2Mm",
+            "liftSpeed2MmMin",
+            "bottomLiftDistanceMm",
+            "bottomLiftDistance2Mm",
+            "bottomLiftSpeedMmMin",
+            "bottomLiftSpeed2MmMin",
+        ]
+        .iter()
+        .copied()
+        .any(|key| read_positive_f32(ctb_root, key) || read_positive_f32(export_ctb_root, key));
+
+        per_layer_settings = match settings_mode.as_deref() {
+            Some("simple") => false,
+            Some("twostage") => true,
+            _ => has_explicit_two_stage_motion,
+        };
+
         let pls_direct = parse_bool_meta(&meta, "ctb", "perLayerSettings");
         let pls_nested = meta
             .get("export")
             .and_then(|v| v.get("ctb"))
             .and_then(|v| v.get("perLayerSettings"))
             .and_then(Value::as_bool);
-        per_layer_settings = pls_direct.or(pls_nested).unwrap_or(false);
+        per_layer_settings = pls_direct.or(pls_nested).unwrap_or(per_layer_settings);
     }
 
     anti_alias_level = anti_alias_level.max(1);

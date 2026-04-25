@@ -75,10 +75,15 @@ fn write_ctb_header(
 }
 
 fn write_ctb_print_parameters(out: &mut Vec<u8>, timing: CtbTimingModel) {
-    push_f32(out, timing.lift_distance_mm);
+    // CTB print-parameter lift heights are TOTAL heights (stage1 + stage2).
+    // UVTools/ChiTuBox derive stage1 lift height as (total_height - stage2_height).
+    let bottom_lift_total_mm = timing.bottom_lift_distance_mm + timing.bottom_lift_distance2_mm;
+    let lift_total_mm = timing.lift_distance_mm + timing.lift_distance2_mm;
+
+    push_f32(out, bottom_lift_total_mm.max(0.0));
+    push_f32(out, timing.bottom_lift_speed_mm_min);
+    push_f32(out, lift_total_mm.max(0.0));
     push_f32(out, timing.lift_speed_mm_min);
-    push_f32(out, timing.lift_distance2_mm);
-    push_f32(out, timing.lift_speed2_mm_min);
     push_f32(out, timing.retract_speed_mm_min);
     push_f32(out, timing.retract_distance_mm);
     push_f32(out, timing.retract_distance2_mm);
@@ -100,12 +105,17 @@ fn write_ctb_slicer_info_fixed(
     machine_name_size: u32,
     print_parameters_v4_address: u32,
 ) {
-    push_f32(out, timing.lift_distance_mm);
-    push_f32(out, timing.lift_speed_mm_min);
-    push_f32(out, timing.retract_distance_mm);
+    // CTB v4/v5 slicer-info fields (UVTools/ChiTuBox semantics):
+    //   [0] BottomLiftHeight2, [1] BottomLiftSpeed2,
+    //   [2] LiftHeight2,       [3] LiftSpeed2,
+    //   [4] RetractHeight2,    [5] RetractSpeed2,
+    //   [6] RestTimeAfterLift.
+    push_f32(out, timing.bottom_lift_distance2_mm);
+    push_f32(out, timing.bottom_lift_speed2_mm_min);
+    push_f32(out, timing.lift_distance2_mm);
+    push_f32(out, timing.lift_speed2_mm_min);
     push_f32(out, timing.retract_distance2_mm);
-    push_f32(out, timing.bottom_retract_height2_mm);
-    push_f32(out, timing.bottom_retract_speed2_mm_min);
+    push_f32(out, timing.retract_speed2_mm_min);
     push_f32(out, timing.wait_time_after_lift_sec);
 
     push_u32(out, machine_name_offset);

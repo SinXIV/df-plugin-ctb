@@ -287,10 +287,15 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     push_u32(&mut settings, small_preview_offset);
     push_u32(&mut settings, print_time_sec);
     push_u32(&mut settings, build.projector_type);
-    push_f32(&mut settings, timing.lift_distance_mm);
+    // CTB print-parameter lift heights are TOTAL heights (stage1 + stage2).
+    // UVTools/ChiTuBox derive stage1 lift height as (total_height - stage2_height).
+    let bottom_lift_total_mm = timing.bottom_lift_distance_mm + timing.bottom_lift_distance2_mm;
+    let lift_total_mm = timing.lift_distance_mm + timing.lift_distance2_mm;
+
+    push_f32(&mut settings, bottom_lift_total_mm.max(0.0));
+    push_f32(&mut settings, timing.bottom_lift_speed_mm_min);
+    push_f32(&mut settings, lift_total_mm.max(0.0));
     push_f32(&mut settings, timing.lift_speed_mm_min);
-    push_f32(&mut settings, timing.lift_distance2_mm);
-    push_f32(&mut settings, timing.lift_speed2_mm_min);
     push_f32(&mut settings, timing.retract_speed_mm_min);
     push_f32(&mut settings, timing.retract_distance_mm);
     push_f32(&mut settings, timing.retract_distance2_mm);
@@ -300,12 +305,15 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     push_u16(&mut settings, 255);
     push_u16(&mut settings, 255);
     push_u32(&mut settings, build.layer_xor_key);
-    push_f32(&mut settings, 0.0);
-    push_f32(&mut settings, 0.0);
-    push_f32(&mut settings, 0.0);
-    push_f32(&mut settings, 0.0);
-    push_f32(&mut settings, timing.bottom_retract_height2_mm);
-    push_f32(&mut settings, timing.bottom_retract_speed2_mm_min);
+    // CTB encrypted slicer settings map these slots to:
+    //   BottomLiftHeight2, BottomLiftSpeed2, LiftHeight2, LiftSpeed2,
+    //   RetractHeight2, RetractSpeed2.
+    push_f32(&mut settings, timing.bottom_lift_distance2_mm);
+    push_f32(&mut settings, timing.bottom_lift_speed2_mm_min);
+    push_f32(&mut settings, timing.lift_distance2_mm);
+    push_f32(&mut settings, timing.lift_speed2_mm_min);
+    push_f32(&mut settings, timing.retract_distance2_mm);
+    push_f32(&mut settings, timing.retract_speed2_mm_min);
     push_f32(&mut settings, timing.wait_time_after_lift_sec);
     push_u32(&mut settings, machine_name_offset);
     push_u32(&mut settings, machine_name_size);

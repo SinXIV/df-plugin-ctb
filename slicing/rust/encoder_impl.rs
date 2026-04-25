@@ -1015,6 +1015,163 @@ mod tests {
     }
 
     #[test]
+    fn build_model_infers_per_layer_settings_for_twostage_mode() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{
+            "printer": {
+                "settingsMode": "twostage"
+            },
+            "ctb": {
+                "version": 5
+            }
+        }"#
+        .to_string();
+
+        let build = parse_ctb_build_model_from_job(&job);
+        assert!(build.per_layer_settings);
+    }
+
+    #[test]
+    fn ctb_print_parameters_store_total_lift_heights_for_uvtools_stage1_derivation() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{
+            "material": {
+                "liftDistanceMm": 1.0,
+                "liftSpeedMmMin": 65.0,
+                "normalExposureSec": 2.0,
+                "bottomExposureSec": 20.0,
+                "bottomLayerCount": 2
+            },
+            "ctb": {
+                "version": 5,
+                "settingsMode": "twostage",
+                "bottomLiftDistanceMm": 3.0,
+                "bottomLiftDistance2Mm": 4.0,
+                "bottomLiftSpeedMmMin": 60.0,
+                "bottomLiftSpeed2MmMin": 180.0,
+                "liftDistance2Mm": 4.0,
+                "liftSpeed2MmMin": 240.0
+            }
+        }"#
+        .to_string();
+
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
+
+        let print_params_offset = u32::from_le_bytes(bytes[84..88].try_into().unwrap()) as usize;
+        let bottom_lift_distance_total = f32::from_le_bytes(
+            bytes[print_params_offset..print_params_offset + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let bottom_lift_speed = f32::from_le_bytes(
+            bytes[print_params_offset + 4..print_params_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let normal_lift_distance_total = f32::from_le_bytes(
+            bytes[print_params_offset + 8..print_params_offset + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let normal_lift_speed = f32::from_le_bytes(
+            bytes[print_params_offset + 12..print_params_offset + 16]
+                .try_into()
+                .unwrap(),
+        );
+
+        // UVTools derives stage1 lift heights from (total_height - height2).
+        assert!((bottom_lift_distance_total - 7.0).abs() < f32::EPSILON); // 3.0 + 4.0
+        assert!((bottom_lift_speed - 60.0).abs() < f32::EPSILON);
+        assert!((normal_lift_distance_total - 5.0).abs() < f32::EPSILON); // 1.0 + 4.0
+        assert!((normal_lift_speed - 65.0).abs() < f32::EPSILON);
+
+        let slicer_offset = u32::from_le_bytes(bytes[104..108].try_into().unwrap()) as usize;
+        assert_eq!(bytes[slicer_offset + 39], 0x50);
+    }
+
+    #[test]
+    fn ctb_slicer_info_stores_two_stage_lift_values() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{
+            "material": {
+                "liftDistanceMm": 1.0,
+                "liftSpeedMmMin": 65.0,
+                "normalExposureSec": 2.0,
+                "bottomExposureSec": 20.0,
+                "bottomLayerCount": 2,
+                "retractDistance2Mm": 1.0,
+                "retractSpeed2MmMin": 60.0
+            },
+            "ctb": {
+                "version": 5,
+                "settingsMode": "twostage",
+                "bottomLiftDistance2Mm": 4.0,
+                "bottomLiftSpeed2MmMin": 180.0,
+                "liftDistance2Mm": 4.0,
+                "liftSpeed2MmMin": 240.0,
+                "waitTimeAfterLiftSec": 0.75
+            }
+        }"#
+        .to_string();
+
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("container should build");
+        let slicer_offset = u32::from_le_bytes(bytes[104..108].try_into().unwrap()) as usize;
+
+        let bottom_lift_height2 =
+            f32::from_le_bytes(bytes[slicer_offset..slicer_offset + 4].try_into().unwrap());
+        let bottom_lift_speed2 = f32::from_le_bytes(
+            bytes[slicer_offset + 4..slicer_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let lift_height2 = f32::from_le_bytes(
+            bytes[slicer_offset + 8..slicer_offset + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let lift_speed2 = f32::from_le_bytes(
+            bytes[slicer_offset + 12..slicer_offset + 16]
+                .try_into()
+                .unwrap(),
+        );
+        let retract_height2 = f32::from_le_bytes(
+            bytes[slicer_offset + 16..slicer_offset + 20]
+                .try_into()
+                .unwrap(),
+        );
+        let retract_speed2 = f32::from_le_bytes(
+            bytes[slicer_offset + 20..slicer_offset + 24]
+                .try_into()
+                .unwrap(),
+        );
+        let wait_after_lift = f32::from_le_bytes(
+            bytes[slicer_offset + 24..slicer_offset + 28]
+                .try_into()
+                .unwrap(),
+        );
+
+        assert!((bottom_lift_height2 - 4.0).abs() < f32::EPSILON);
+        assert!((bottom_lift_speed2 - 180.0).abs() < f32::EPSILON);
+        assert!((lift_height2 - 4.0).abs() < f32::EPSILON);
+        assert!((lift_speed2 - 240.0).abs() < f32::EPSILON);
+        assert!((retract_height2 - 1.0).abs() < f32::EPSILON);
+        assert!((retract_speed2 - 60.0).abs() < f32::EPSILON);
+        assert!((wait_after_lift - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn layer_xor_roundtrip_restores_original() {
         let seed = 0x1234_5678;
         let layer_index = 7;
@@ -1288,6 +1445,65 @@ mod tests {
 
         let trailer = u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap());
         assert_eq!(trailer, 1_833_054_899);
+    }
+
+    #[test]
+    fn ctb_v5enc_settings_store_two_stage_lift_values() {
+        let mut job = make_test_job();
+        job.metadata_json = r#"{
+            "material": {
+                "liftDistanceMm": 1.0,
+                "liftSpeedMmMin": 65.0,
+                "normalExposureSec": 2.0,
+                "bottomExposureSec": 20.0,
+                "bottomLayerCount": 2,
+                "retractDistance2Mm": 1.0,
+                "retractSpeed2MmMin": 60.0
+            },
+            "ctb": {
+                "version": 5,
+                "settingsMode": "twostage",
+                "bottomLiftDistance2Mm": 4.0,
+                "bottomLiftSpeed2MmMin": 180.0,
+                "liftDistance2Mm": 4.0,
+                "liftSpeed2MmMin": 240.0,
+                "waitTimeAfterLiftSec": 0.75
+            }
+        }"#
+        .to_string();
+        job.format_version = Some("v5enc".to_string());
+
+        let prepared = vec![CtbPreparedLayer {
+            index: 0,
+            source_len: 16,
+            encoded: vec![2, 0, 255],
+        }];
+
+        let bytes = build_ctb_container_bytes(&job, &prepared).expect("v5enc mode should build");
+        let mut settings = bytes[super::ctb_types::CTB_ENCRYPTED_SETTINGS_OFFSET as usize
+            ..(super::ctb_types::CTB_ENCRYPTED_SETTINGS_OFFSET
+                + super::ctb_types::CTB_ENCRYPTED_SETTINGS_SIZE) as usize]
+            .to_vec();
+        let (key, iv) = super::ctb_crypto::ctb_default_key_iv();
+        super::ctb_crypto::ctb_decrypt_in_place_no_padding(&mut settings, &key, &iv)
+            .expect("settings block should decrypt");
+
+        let read_f32 = |offset: usize| -> f32 {
+            f32::from_le_bytes(settings[offset..offset + 4].try_into().unwrap())
+        };
+
+        // Global print-parameter lift heights store TOTAL heights (stage1 + stage2).
+        assert!((read_f32(84) - 4.0).abs() < f32::EPSILON); // bottom total = 0 + 4 (no bottom stage1 provided)
+        assert!((read_f32(92) - 5.0).abs() < f32::EPSILON); // normal total = 1 + 4
+
+        // SlicerSettings fields 33..39 in UVTools mapping.
+        assert!((read_f32(132) - 4.0).abs() < f32::EPSILON); // BottomLiftHeight2
+        assert!((read_f32(136) - 180.0).abs() < f32::EPSILON); // BottomLiftSpeed2
+        assert!((read_f32(140) - 4.0).abs() < f32::EPSILON); // LiftHeight2
+        assert!((read_f32(144) - 240.0).abs() < f32::EPSILON); // LiftSpeed2
+        assert!((read_f32(148) - 1.0).abs() < f32::EPSILON); // RetractHeight2
+        assert!((read_f32(152) - 60.0).abs() < f32::EPSILON); // RetractSpeed2
+        assert!((read_f32(156) - 0.75).abs() < f32::EPSILON); // RestTimeAfterLift
     }
 
     #[test]
