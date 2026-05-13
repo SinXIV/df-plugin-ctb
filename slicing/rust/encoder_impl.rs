@@ -902,6 +902,8 @@ mod tests {
             png_compression_strategy: "balanced".to_string(),
             container_compression_level: 2,
             anti_aliasing_level: "Off".to_string(),
+            anti_aliasing_mode: "Blur".to_string(),
+            blur_brush_radius_px: 1,
             aa_on_supports: false,
             minimum_aa_alpha_percent: 35.0,
             mirror_x: false,
