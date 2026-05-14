@@ -905,6 +905,7 @@ mod tests {
             anti_aliasing_mode: "Blur".to_string(),
             blur_brush_radius_px: 1,
             aa_on_supports: false,
+            model_triangle_count: 0,
             minimum_aa_alpha_percent: 35.0,
             mirror_x: false,
             mirror_y: false,
