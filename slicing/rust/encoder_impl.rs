@@ -908,6 +908,8 @@ mod tests {
             minimum_aa_alpha_percent: 35.0,
             mirror_x: false,
             mirror_y: false,
+            z_blend_look_back: 2,
+            z_blend_fade_px: 20,
             triangles_xyz: vec![],
             metadata_json: "{}".to_string(),
             x_packing_mode: "none".to_string(),
