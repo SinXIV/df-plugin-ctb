@@ -914,6 +914,7 @@ mod tests {
             z_blend_auto_fade: true,
             z_blend_minimum_alpha_percent: 0.0,
             z_blend_max_alpha_percent: 90.0,
+            z_blend_custom_lut: None,
             z_blend_debug_color_overlay: false,
             triangles_xyz: vec![],
             metadata_json: "{}".to_string(),
