@@ -347,8 +347,7 @@ impl FormatEncoder for CtbPluginEncoder {
             let worker_threshold = threshold;
             let worker_layer_xor_key = build.layer_xor_key;
             let worker_expected_pixels = expected_pixels;
-            let worker_is_anti_aliased =
-                job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
+            let worker_is_anti_aliased = job.produces_grayscale_output();
 
             let handle = thread::spawn(move || loop {
                 let task = work_rx.recv();
@@ -415,7 +414,7 @@ impl FormatEncoder for CtbPluginEncoder {
     ) -> Result<Option<Box<dyn RleStreamEncoder>>, SlicerV3Error> {
         let build = parse_ctb_build_model_from_job(job);
         let threshold = parse_threshold_from_metadata(&job.metadata_json);
-        let is_anti_aliased = job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
+        let is_anti_aliased = job.produces_grayscale_output();
         let total_pixels =
             (job.source_width_px as usize).saturating_mul(job.source_height_px as usize);
         Ok(Some(Box::new(CtbRleStreamingEncoder {
@@ -486,7 +485,7 @@ impl FormatEncoder for CtbPluginEncoder {
             }
         });
 
-        let is_anti_aliased = job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
+        let is_anti_aliased = job.produces_grayscale_output();
         let prepared = prepare_layers_for_ctb_with_progress(
             raw_masks,
             is_anti_aliased,
@@ -556,7 +555,7 @@ impl FormatEncoder for CtbPluginEncoder {
 
         let threshold = parse_threshold_from_metadata(&job.metadata_json);
         let build = parse_ctb_build_model_from_job(job);
-        let is_anti_aliased = job.anti_aliasing_level != "Off" && job.anti_aliasing_level != "1";
+        let is_anti_aliased = job.produces_grayscale_output();
         let prepared =
             prepare_layers_for_ctb(raw_masks, is_anti_aliased, threshold, build.layer_xor_key);
 
@@ -902,10 +901,19 @@ mod tests {
             png_compression_strategy: "balanced".to_string(),
             container_compression_level: 2,
             anti_aliasing_level: "Off".to_string(),
+            anti_aliasing_mode: "Blur".to_string(),
+            blur_brush_radius_px: 1,
             aa_on_supports: false,
+            model_triangle_count: 0,
             minimum_aa_alpha_percent: 35.0,
             mirror_x: false,
             mirror_y: false,
+            z_blend_look_back: 2,
+            z_blend_fade_px: 20,
+            z_blend_auto_fade: true,
+            z_blend_minimum_alpha_percent: 0.0,
+            z_blend_max_alpha_percent: 90.0,
+            z_blend_custom_lut: None,
             triangles_xyz: vec![],
             metadata_json: "{}".to_string(),
             x_packing_mode: "none".to_string(),
