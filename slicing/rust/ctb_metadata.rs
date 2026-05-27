@@ -88,6 +88,9 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
             wait_time_before_cure_sec: 0.0,
             wait_time_after_cure_sec: 0.0,
             wait_time_after_lift_sec: 0.0,
+            bottom_wait_time_before_cure_sec: 0.0,
+            bottom_wait_time_after_cure_sec: 0.0,
+            bottom_wait_time_after_lift_sec: 0.0,
         };
     };
 
@@ -185,6 +188,9 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         wait_time_before_cure_sec: read_f32("waitTimeBeforeCureSec"),
         wait_time_after_cure_sec: read_f32("waitTimeAfterCureSec"),
         wait_time_after_lift_sec: read_f32("waitTimeAfterLiftSec"),
+        bottom_wait_time_before_cure_sec: read_f32("bottomWaitTimeBeforeCureSec"),
+        bottom_wait_time_after_cure_sec: read_f32("bottomWaitTimeAfterCureSec"),
+        bottom_wait_time_after_lift_sec: read_f32("bottomWaitTimeAfterLiftSec"),
     };
 
     let sanitize_non_negative = |value: f32| {
@@ -218,6 +224,9 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
     timing.wait_time_before_cure_sec = sanitize_non_negative(timing.wait_time_before_cure_sec);
     timing.wait_time_after_cure_sec = sanitize_non_negative(timing.wait_time_after_cure_sec);
     timing.wait_time_after_lift_sec = sanitize_non_negative(timing.wait_time_after_lift_sec);
+    timing.bottom_wait_time_before_cure_sec = sanitize_non_negative(timing.bottom_wait_time_before_cure_sec);
+    timing.bottom_wait_time_after_cure_sec = sanitize_non_negative(timing.bottom_wait_time_after_cure_sec);
+    timing.bottom_wait_time_after_lift_sec = sanitize_non_negative(timing.bottom_wait_time_after_lift_sec);
 
     if timing.lift_distance2_mm <= 0.0 {
         timing.lift_distance2_mm = timing.lift_distance_mm;
@@ -520,10 +529,19 @@ pub(super) fn parse_ctb_build_model_from_job(job: &SliceJobV3) -> CtbBuildModel 
         .copied()
         .any(|key| read_positive_f32(ctb_root, key) || read_positive_f32(export_ctb_root, key));
 
+        let has_explicit_bottom_wait_time = [
+            "bottomWaitTimeBeforeCureSec",
+            "bottomWaitTimeAfterCureSec",
+            "bottomWaitTimeAfterLiftSec",
+        ]
+        .iter()
+        .copied()
+        .any(|key| read_positive_f32(ctb_root, key) || read_positive_f32(export_ctb_root, key));
+
         per_layer_settings = match settings_mode.as_deref() {
             Some("simple") => false,
             Some("twostage") => true,
-            _ => has_explicit_two_stage_motion,
+            _ => has_explicit_two_stage_motion || has_explicit_bottom_wait_time,
         };
 
         let pls_direct = parse_bool_meta(&meta, "ctb", "perLayerSettings");

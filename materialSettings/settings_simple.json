@@ -161,6 +161,39 @@
       "metadataPath": "ctb.waitTimeAfterLiftSec"
     },
     {
+      "key": "bottomWaitTimeBeforeCureSec",
+      "label": "Bottom Wait Before Cure (s)",
+      "kind": "number",
+      "defaultValue": 0,
+      "min": 0,
+      "max": 120,
+      "step": 0.01,
+      "placement": { "tabId": "simple", "sectionId": "timing", "cardId": "timing-settings", "order": 41 },
+      "metadataPath": "ctb.bottomWaitTimeBeforeCureSec"
+    },
+    {
+      "key": "bottomWaitTimeAfterCureSec",
+      "label": "Bottom Wait After Cure (s)",
+      "kind": "number",
+      "defaultValue": 0,
+      "min": 0,
+      "max": 120,
+      "step": 0.01,
+      "placement": { "tabId": "simple", "sectionId": "timing", "cardId": "timing-settings", "order": 51 },
+      "metadataPath": "ctb.bottomWaitTimeAfterCureSec"
+    },
+    {
+      "key": "bottomWaitTimeAfterLiftSec",
+      "label": "Bottom Wait After Lift (s)",
+      "kind": "number",
+      "defaultValue": 0,
+      "min": 0,
+      "max": 120,
+      "step": 0.01,
+      "placement": { "tabId": "simple", "sectionId": "timing", "cardId": "timing-settings", "order": 61 },
+      "metadataPath": "ctb.bottomWaitTimeAfterLiftSec"
+    },
+    {
       "key": "projectorPwmPercent",
       "label": "Projector PWM (%)",
       "kind": "number",
