@@ -130,6 +130,11 @@ fn write_ctb_slicer_info_fixed(
         },
     );
     push_u16(out, 0);
+
+    // Activate per layer settings in CTB for v5 or v4
+    // 0x50 for CTBv5
+    // 0x40 for CTBv4
+    // 0x00 Disabled
     push_u8(
         out,
         if build.per_layer_settings {

@@ -269,13 +269,14 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         timing.lift_speed2_mm_min = 0.0;
         timing.retract_distance2_mm = 0.0;
         timing.retract_speed2_mm_min = 0.0;
-        timing.bottom_lift_distance_mm = 0.0;
         timing.bottom_lift_distance2_mm = 0.0;
-        timing.bottom_lift_speed_mm_min = 0.0;
         timing.bottom_lift_speed2_mm_min = 0.0;
-        timing.bottom_retract_speed_mm_min = 0.0;
         timing.bottom_retract_speed2_mm_min = 0.0;
         timing.bottom_retract_height2_mm = 0.0;
+        
+        timing.bottom_wait_time_after_cure_sec = 0.0;
+        timing.bottom_wait_time_after_lift_sec = 0.0;
+        timing.bottom_wait_time_before_cure_sec = 0.0;
     }
 
     timing
