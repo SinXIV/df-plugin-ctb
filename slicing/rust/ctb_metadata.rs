@@ -3,7 +3,6 @@ use crate::types::SliceJobV3;
 use base64::Engine;
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
-use log::trace;
 
 use super::ctb_types::{
     CtbBuildModel, CtbResinModel, CtbTimingModel, CTB_DISCLAIMER_B64, DEFAULT_BINARY_THRESHOLD,
@@ -139,9 +138,7 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
 
     // Beta one step for S4U tilting + bottom wait times 
     let is_beta_simple_mode = matches!(settings_mode.as_deref(), Some("betaonestep"));
-    
-    trace!("settings_mode value: {:?}", settings_mode);
-    trace!("is_beta_simple_mode: {}", is_beta_simple_mode);
+
 
     let read_f32 = |key: &str| {
         ctb.and_then(|m| m.get(key))
