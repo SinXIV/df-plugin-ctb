@@ -3,6 +3,7 @@ use crate::types::SliceJobV3;
 use base64::Engine;
 use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
+use log::trace;
 
 use super::ctb_types::{
     CtbBuildModel, CtbResinModel, CtbTimingModel, CTB_DISCLAIMER_B64, DEFAULT_BINARY_THRESHOLD,
@@ -135,6 +136,12 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         })
         .map(|v| v.trim().to_ascii_lowercase());
     let is_simple_mode = matches!(settings_mode.as_deref(), Some("simple"));
+
+    // Beta one step for S4U tilting + bottom wait times 
+    let is_beta_simple_mode = matches!(settings_mode.as_deref(), Some("betaonestep"));
+    
+    trace!("settings_mode value: {:?}", settings_mode);
+    trace!("is_beta_simple_mode: {}", is_beta_simple_mode);
 
     let read_f32 = |key: &str| {
         ctb.and_then(|m| m.get(key))
@@ -277,6 +284,17 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         timing.bottom_wait_time_after_cure_sec = 0.0;
         timing.bottom_wait_time_after_lift_sec = 0.0;
         timing.bottom_wait_time_before_cure_sec = 0.0;
+    }
+
+    if is_beta_simple_mode {
+        timing.lift_distance2_mm = 0.0;
+        timing.lift_speed2_mm_min = 0.0;
+        timing.retract_distance2_mm = 0.0;
+        timing.retract_speed2_mm_min = 0.0;
+        timing.bottom_lift_distance2_mm = 0.0;
+        timing.bottom_lift_speed2_mm_min = 0.0;
+        timing.bottom_retract_speed2_mm_min = 0.0;
+        timing.bottom_retract_height2_mm = 0.0;
     }
 
     timing
