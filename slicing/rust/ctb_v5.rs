@@ -130,6 +130,11 @@ fn write_ctb_slicer_info_fixed(
         },
     );
     push_u16(out, 0);
+
+    // Activate per layer settings in CTB for v5 or v4
+    // 0x50 for CTBv5
+    // 0x40 for CTBv4
+    // 0x00 Disabled
     push_u8(
         out,
         if build.per_layer_settings {
@@ -331,6 +336,21 @@ fn write_layer_def_ex(
     } else {
         timing.retract_speed2_mm_min
     };
+    let wait_time_after_cure = if is_bottom {
+        timing.bottom_wait_time_after_cure_sec
+    } else {
+        timing.wait_time_after_cure_sec
+    };
+    let wait_time_after_lift = if is_bottom {
+        timing.bottom_wait_time_after_lift_sec
+    } else {
+        timing.wait_time_after_lift_sec
+    };
+    let wait_time_before_cure = if is_bottom {
+        timing.bottom_wait_time_before_cure_sec
+    } else {
+        timing.wait_time_before_cure_sec
+    };
 
     // Per-layer CTBv4/v5 semantics follow Chitubox/UVtools LayerDefEx:
     // LiftHeight is total (stage1 + stage2), RetractHeight2 is stage2 retract distance.
@@ -338,6 +358,7 @@ fn write_layer_def_ex(
     let lift_height_2 = clamp_non_negative(lift_distance2);
     let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
     let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
+    
 
     out.extend_from_slice(layer_def_bytes);
     push_u32(out, CTB_LAYER_DEF_EX_SIZE + layer.encoded.len() as u32);
@@ -349,9 +370,9 @@ fn write_layer_def_ex(
     push_f32(out, clamp_non_negative(retract_speed));
     push_f32(out, retract_height_2);
     push_f32(out, clamp_non_negative(retract_speed2));
-    push_f32(out, clamp_non_negative(timing.wait_time_after_cure_sec));
-    push_f32(out, clamp_non_negative(timing.wait_time_after_lift_sec));
-    push_f32(out, clamp_non_negative(timing.wait_time_before_cure_sec));
+    push_f32(out, clamp_non_negative(wait_time_after_cure));
+    push_f32(out, clamp_non_negative(wait_time_after_lift));
+    push_f32(out, clamp_non_negative(wait_time_before_cure));
     push_f32(out, 255.0);
 }
 

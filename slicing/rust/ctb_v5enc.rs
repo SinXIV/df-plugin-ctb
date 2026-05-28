@@ -67,6 +67,22 @@ fn write_ctb_encrypted_layer_def(
     } else {
         timing.retract_speed2_mm_min
     };
+    let wait_time_after_cure = if is_bottom {
+        timing.bottom_wait_time_after_cure_sec
+    } else {
+        timing.wait_time_after_cure_sec
+    };
+    let wait_time_after_lift = if is_bottom {
+        timing.bottom_wait_time_after_lift_sec
+    } else {
+        timing.wait_time_after_lift_sec
+    };
+    let wait_time_before_cure = if is_bottom {
+        timing.bottom_wait_time_before_cure_sec
+    } else {
+        timing.wait_time_before_cure_sec
+    };
+
 
     let lift_height_1 = clamp_non_negative(lift_distance);
     let lift_height_2 = clamp_non_negative(lift_distance2);
@@ -90,9 +106,9 @@ fn write_ctb_encrypted_layer_def(
     push_f32(out, clamp_non_negative(retract_speed));
     push_f32(out, retract_height_2);
     push_f32(out, clamp_non_negative(retract_speed2));
-    push_f32(out, clamp_non_negative(timing.wait_time_after_cure_sec));
-    push_f32(out, clamp_non_negative(timing.wait_time_after_lift_sec));
-    push_f32(out, clamp_non_negative(timing.wait_time_before_cure_sec));
+    push_f32(out, clamp_non_negative(wait_time_after_cure));
+    push_f32(out, clamp_non_negative(wait_time_after_lift));
+    push_f32(out, clamp_non_negative(wait_time_before_cure));
     push_f32(out, 255.0);
     push_u32(out, 0);
 }
