@@ -88,6 +88,7 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
             wait_time_before_cure_sec: 0.0,
             wait_time_after_cure_sec: 0.0,
             wait_time_after_lift_sec: 0.0,
+            wait_time_bottom_layer_count: 0,
             bottom_wait_time_before_cure_sec: 0.0,
             bottom_wait_time_after_cure_sec: 0.0,
             bottom_wait_time_after_lift_sec: 0.0,
@@ -192,6 +193,7 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         wait_time_before_cure_sec: read_f32("waitTimeBeforeCureSec"),
         wait_time_after_cure_sec: read_f32("waitTimeAfterCureSec"),
         wait_time_after_lift_sec: read_f32("waitTimeAfterLiftSec"),
+        wait_time_bottom_layer_count: read_u32("waitTimeBottomLayerCount"),
         bottom_wait_time_before_cure_sec: read_f32("bottomWaitTimeBeforeCureSec"),
         bottom_wait_time_after_cure_sec: read_f32("bottomWaitTimeAfterCureSec"),
         bottom_wait_time_after_lift_sec: read_f32("bottomWaitTimeAfterLiftSec"),
@@ -266,6 +268,10 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
     }
     if timing.bottom_retract_height2_mm <= 0.0 {
         timing.bottom_retract_height2_mm = timing.retract_distance2_mm;
+    }
+
+    if timing.wait_time_bottom_layer_count < timing.bottom_layer_count {
+        timing.wait_time_bottom_layer_count = timing.bottom_layer_count;
     }
 
     if is_simple_mode {

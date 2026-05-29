@@ -305,6 +305,8 @@ fn write_layer_def_ex(
         }
     };
 
+    let is_bottom_wait = (layer.index as u32) < timing.wait_time_bottom_layer_count;
+
     // Use bottom lift distance for bottom layers, normal for others
     let lift_distance = if is_bottom {
         timing.bottom_lift_distance_mm
@@ -336,17 +338,17 @@ fn write_layer_def_ex(
     } else {
         timing.retract_speed2_mm_min
     };
-    let wait_time_after_cure = if is_bottom {
+    let wait_time_after_cure = if is_bottom_wait {
         timing.bottom_wait_time_after_cure_sec
     } else {
         timing.wait_time_after_cure_sec
     };
-    let wait_time_after_lift = if is_bottom {
+    let wait_time_after_lift = if is_bottom_wait {
         timing.bottom_wait_time_after_lift_sec
     } else {
         timing.wait_time_after_lift_sec
     };
-    let wait_time_before_cure = if is_bottom {
+    let wait_time_before_cure = if is_bottom_wait {
         timing.bottom_wait_time_before_cure_sec
     } else {
         timing.wait_time_before_cure_sec
