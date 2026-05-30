@@ -43,6 +43,7 @@ fn write_ctb_header(
     slicer_offset: u32,
     slicer_size: u32,
 ) {
+    let projector_duty_cycle_pwm = clamp_non_negative(timing.projector_duty_cycle_percent) * 2.55;
     push_u32(out, magic);
     push_u32(out, version);
     push_f32(out, job.build_width_mm);
@@ -67,8 +68,8 @@ fn write_ctb_header(
     push_u32(out, print_parameters_offset);
     push_u32(out, CTB_PRINT_PARAMETERS_SIZE);
     push_u32(out, 1);
-    push_u16(out, 255);
-    push_u16(out, 255);
+    push_u16(out, projector_duty_cycle_pwm);
+    push_u16(out, projector_duty_cycle_percent);
     push_u32(out, build.layer_xor_key);
     push_u32(out, slicer_offset);
     push_u32(out, slicer_size);
@@ -360,6 +361,7 @@ fn write_layer_def_ex(
     let lift_height_2 = clamp_non_negative(lift_distance2);
     let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
     let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
+    let projector_duty_cycle_pwm = timing.projector_duty_cycle_percent * 2.55;
     
 
     out.extend_from_slice(layer_def_bytes);
@@ -375,7 +377,7 @@ fn write_layer_def_ex(
     push_f32(out, clamp_non_negative(wait_time_after_cure));
     push_f32(out, clamp_non_negative(wait_time_after_lift));
     push_f32(out, clamp_non_negative(wait_time_before_cure));
-    push_f32(out, 255.0);
+    push_f32(out, clamp_non_negative(projector_duty_cycle_pwm));
 }
 
 fn compute_print_time_seconds(prepared_count: usize, timing: CtbTimingModel) -> u32 {
