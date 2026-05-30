@@ -69,7 +69,7 @@ fn write_ctb_header(
     push_u32(out, CTB_PRINT_PARAMETERS_SIZE);
     push_u32(out, 1);
     push_u16(out, projector_duty_cycle_pwm);
-    push_u16(out, projector_duty_cycle_percent);
+    push_u16(out, projector_duty_cycle_pwm);
     push_u32(out, build.layer_xor_key);
     push_u32(out, slicer_offset);
     push_u32(out, slicer_size);
