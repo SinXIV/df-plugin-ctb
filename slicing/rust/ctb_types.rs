@@ -47,7 +47,7 @@ pub(super) struct CtbTimingModel {
     pub light_off_delay_sec: f32,
     pub bottom_light_off_delay_sec: f32,
     pub bottom_layer_count: u32,
-    //pub bottom_layer_projector_duty_cycle_pwm: f32,
+    pub bottom_layer_projector_duty_cycle_pwm: f32,
     pub lift_distance_mm: f32,
     pub lift_distance2_mm: f32,
     pub lift_speed_mm_min: f32,
@@ -71,7 +71,7 @@ pub(super) struct CtbTimingModel {
     pub bottom_wait_time_before_cure_sec: f32,
     pub bottom_wait_time_after_cure_sec: f32,
     pub bottom_wait_time_after_lift_sec: f32,
-    pub projector_duty_cycle_percent: f32,
+    pub projector_duty_cycle_pwm: f32,
 }
 
 #[derive(Debug, Clone)]

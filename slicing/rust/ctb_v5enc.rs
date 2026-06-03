@@ -90,7 +90,6 @@ fn write_ctb_encrypted_layer_def(
     let lift_height_2 = clamp_non_negative(lift_distance2);
     let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
     let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
-    let projector_duty_cycle_pwm = timing.projector_duty_cycle_percent * 2.55;
 
     push_u32(out, CTB_ENCRYPTED_LAYER_DEF_SIZE);
     push_f32(out, position_z_mm);
@@ -112,7 +111,7 @@ fn write_ctb_encrypted_layer_def(
     push_f32(out, clamp_non_negative(wait_time_after_cure));
     push_f32(out, clamp_non_negative(wait_time_after_lift));
     push_f32(out, clamp_non_negative(wait_time_before_cure));
-    push_f32(out, clamp_non_negative(projector_duty_cycle_percent));
+    push_f32(out, clamp_non_negative(timing.projector_duty_cycle_pwm));
     push_u32(out, 0);
 }
 
@@ -310,7 +309,6 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     // UVTools/ChiTuBox derive stage1 lift height as (total_height - stage2_height).
     let bottom_lift_total_mm = timing.bottom_lift_distance_mm + timing.bottom_lift_distance2_mm;
     let lift_total_mm = timing.lift_distance_mm + timing.lift_distance2_mm;
-    let projector_duty_cycle_pwm = timing.projector_duty_cycle_percent * 2.55;
 
     push_f32(&mut settings, bottom_lift_total_mm.max(0.0));
     push_f32(&mut settings, timing.bottom_lift_speed_mm_min);
@@ -322,8 +320,8 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     push_f32(&mut settings, timing.retract_speed2_mm_min);
     push_f32(&mut settings, timing.bottom_light_off_delay_sec);
     push_u32(&mut settings, 1);
-    push_u16(&mut settings, projector_duty_cycle_pwm); // Normal layer PWM
-    push_u16(&mut settings, projector_duty_cycle_pwm); // Bottom layer PWM
+    push_u16(&mut settings, timing.projector_duty_cycle_pwm); // Normal layer PWM
+    push_u16(&mut settings, timing.bottom_layer_projector_duty_cycle_pwm); // Bottom layer PWM
     push_u32(&mut settings, build.layer_xor_key);
     // CTB encrypted slicer settings map these slots to:
     //   BottomLiftHeight2, BottomLiftSpeed2, LiftHeight2, LiftSpeed2,
