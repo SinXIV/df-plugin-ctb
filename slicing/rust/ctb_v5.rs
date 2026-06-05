@@ -43,7 +43,6 @@ fn write_ctb_header(
     slicer_offset: u32,
     slicer_size: u32,
 ) {
-    let projector_duty_cycle_pwm = clamp_non_negative(timing.projector_duty_cycle_percent) * 2.55;
     push_u32(out, magic);
     push_u32(out, version);
     push_f32(out, job.build_width_mm);
@@ -354,6 +353,11 @@ fn write_layer_def_ex(
     } else {
         timing.wait_time_before_cure_sec
     };
+    let projector_duty_cycle_pwm = if is_bottom {
+        timing.bottom_layer_projector_duty_cycle_pwm
+    } else {
+        timing.projector_duty_cycle_pwm
+    };
 
     // Per-layer CTBv4/v5 semantics follow Chitubox/UVtools LayerDefEx:
     // LiftHeight is total (stage1 + stage2), RetractHeight2 is stage2 retract distance.
@@ -376,7 +380,7 @@ fn write_layer_def_ex(
     push_f32(out, clamp_non_negative(wait_time_after_cure));
     push_f32(out, clamp_non_negative(wait_time_after_lift));
     push_f32(out, clamp_non_negative(wait_time_before_cure));
-    push_f32(out, clamp_non_negative(timing.projector_duty_cycle_pwm));
+    push_f32(out, clamp_non_negative(projector_duty_cycle_pwm as f32));
 }
 
 fn compute_print_time_seconds(prepared_count: usize, timing: CtbTimingModel) -> u32 {

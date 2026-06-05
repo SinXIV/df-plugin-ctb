@@ -92,7 +92,8 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
             bottom_wait_time_before_cure_sec: 0.0,
             bottom_wait_time_after_cure_sec: 0.0,
             bottom_wait_time_after_lift_sec: 0.0,
-            projector_duty_cycle_pwm: 0.0
+            projector_duty_cycle_pwm: 0,
+            bottom_layer_projector_duty_cycle_pwm: 0,
         };
     };
 
@@ -198,8 +199,8 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         bottom_wait_time_before_cure_sec: read_f32("bottomWaitTimeBeforeCureSec"),
         bottom_wait_time_after_cure_sec: read_f32("bottomWaitTimeAfterCureSec"),
         bottom_wait_time_after_lift_sec: read_f32("bottomWaitTimeAfterLiftSec"),
-        projector_duty_cycle_pwm: read_u32("projectorPwmPercent") * 2.55,
-        bottom_layer_projector_duty_cycle_pwm : read_u32("projectorPwmPercent") * 2.55,
+        projector_duty_cycle_pwm: ((read_u32("projectorPwmPercent") as f32) * 2.55) as u16,
+        bottom_layer_projector_duty_cycle_pwm : ((read_u32("bottomProjectorPwmPercent") as f32) * 2.55) as u16,
     };
 
     let sanitize_non_negative = |value: f32| {
@@ -236,14 +237,12 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
     timing.bottom_wait_time_before_cure_sec = sanitize_non_negative(timing.bottom_wait_time_before_cure_sec);
     timing.bottom_wait_time_after_cure_sec = sanitize_non_negative(timing.bottom_wait_time_after_cure_sec);
     timing.bottom_wait_time_after_lift_sec = sanitize_non_negative(timing.bottom_wait_time_after_lift_sec);
-    timing.projector_duty_cycle_pwm = sanitize_non_negative(timing.projector_duty_cycle_pwm);
-    timing.bottom_layer_projector_duty_cycle_pwm = sanitize_non_negative(timing.bottom_layer_projector_duty_cycle_pwm);
 
-    if timing.projector_duty_cycle_pwm <= 0.0 {
-        timing.projector_duty_cycle_pwm = 255.0;
+    if timing.projector_duty_cycle_pwm <= 0 {
+        timing.projector_duty_cycle_pwm = 255;
     }
-    if timing.bottom_layer_projector_duty_cycle_pwm <= 0.0 {
-        timing.bottom_layer_projector_duty_cycle_pwm = 255.0;
+    if timing.bottom_layer_projector_duty_cycle_pwm <= 0 {
+        timing.bottom_layer_projector_duty_cycle_pwm = 255;
     }
 
     if timing.lift_distance2_mm <= 0.0 {

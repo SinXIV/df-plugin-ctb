@@ -84,6 +84,11 @@ fn write_ctb_encrypted_layer_def(
     } else {
         timing.wait_time_before_cure_sec
     };
+    let projector_duty_cycle_pwm = if is_bottom {
+        timing.bottom_layer_projector_duty_cycle_pwm
+    } else {
+        timing.projector_duty_cycle_pwm
+    };
 
 
     let lift_height_1 = clamp_non_negative(lift_distance);
@@ -111,7 +116,7 @@ fn write_ctb_encrypted_layer_def(
     push_f32(out, clamp_non_negative(wait_time_after_cure));
     push_f32(out, clamp_non_negative(wait_time_after_lift));
     push_f32(out, clamp_non_negative(wait_time_before_cure));
-    push_f32(out, clamp_non_negative(timing.projector_duty_cycle_pwm));
+    push_f32(out, clamp_non_negative(projector_duty_cycle_pwm as f32));
     push_u32(out, 0);
 }
 
