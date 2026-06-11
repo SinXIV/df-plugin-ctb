@@ -13,7 +13,8 @@ export const CTB_FORMAT_DEFINITION: SlicingFormatDefinition = {
   ],
   settingsModes: [
     { value: 'simple', label: 'Simple', isDefault: true },
-    { value: 'twostage', label: 'TwoStage' },
+    { value: 'twostage', label: 'Two Stage' },
+    { value: 'betaonestep', label: 'Advanced Single Step Motion'},
   ],
   rustModulePath: 'formats::ctb',
   wasmExportName: 'encode_ctb_container',

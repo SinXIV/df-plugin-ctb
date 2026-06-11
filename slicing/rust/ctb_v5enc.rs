@@ -36,6 +36,8 @@ fn write_ctb_encrypted_layer_def(
         }
     };
 
+    let is_bottom_wait = (layer.index as u32) < timing.wait_time_bottom_layer_count;
+
     // Use bottom lift distance for bottom layers, normal for others
     let lift_distance = if is_bottom {
         timing.bottom_lift_distance_mm
@@ -67,20 +69,25 @@ fn write_ctb_encrypted_layer_def(
     } else {
         timing.retract_speed2_mm_min
     };
-    let wait_time_after_cure = if is_bottom {
+    let wait_time_after_cure = if is_bottom_wait {
         timing.bottom_wait_time_after_cure_sec
     } else {
         timing.wait_time_after_cure_sec
     };
-    let wait_time_after_lift = if is_bottom {
+    let wait_time_after_lift = if is_bottom_wait {
         timing.bottom_wait_time_after_lift_sec
     } else {
         timing.wait_time_after_lift_sec
     };
-    let wait_time_before_cure = if is_bottom {
+    let wait_time_before_cure = if is_bottom_wait {
         timing.bottom_wait_time_before_cure_sec
     } else {
         timing.wait_time_before_cure_sec
+    };
+    let projector_duty_cycle_pwm = if is_bottom {
+        timing.bottom_layer_projector_duty_cycle_pwm
+    } else {
+        timing.projector_duty_cycle_pwm
     };
 
 
@@ -109,7 +116,7 @@ fn write_ctb_encrypted_layer_def(
     push_f32(out, clamp_non_negative(wait_time_after_cure));
     push_f32(out, clamp_non_negative(wait_time_after_lift));
     push_f32(out, clamp_non_negative(wait_time_before_cure));
-    push_f32(out, 255.0);
+    push_f32(out, clamp_non_negative(projector_duty_cycle_pwm as f32));
     push_u32(out, 0);
 }
 
@@ -318,8 +325,8 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     push_f32(&mut settings, timing.retract_speed2_mm_min);
     push_f32(&mut settings, timing.bottom_light_off_delay_sec);
     push_u32(&mut settings, 1);
-    push_u16(&mut settings, 255);
-    push_u16(&mut settings, 255);
+    push_u16(&mut settings, timing.projector_duty_cycle_pwm); // Normal layer PWM
+    push_u16(&mut settings, timing.bottom_layer_projector_duty_cycle_pwm); // Bottom layer PWM
     push_u32(&mut settings, build.layer_xor_key);
     // CTB encrypted slicer settings map these slots to:
     //   BottomLiftHeight2, BottomLiftSpeed2, LiftHeight2, LiftSpeed2,

@@ -66,9 +66,12 @@ pub(super) struct CtbTimingModel {
     pub wait_time_before_cure_sec: f32,
     pub wait_time_after_cure_sec: f32,
     pub wait_time_after_lift_sec: f32,
+    pub wait_time_bottom_layer_count: u32,
     pub bottom_wait_time_before_cure_sec: f32,
     pub bottom_wait_time_after_cure_sec: f32,
     pub bottom_wait_time_after_lift_sec: f32,
+    pub projector_duty_cycle_pwm: u16,
+    pub bottom_layer_projector_duty_cycle_pwm: u16,
 }
 
 #[derive(Debug, Clone)]

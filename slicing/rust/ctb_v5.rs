@@ -67,8 +67,8 @@ fn write_ctb_header(
     push_u32(out, print_parameters_offset);
     push_u32(out, CTB_PRINT_PARAMETERS_SIZE);
     push_u32(out, 1);
-    push_u16(out, 255);
-    push_u16(out, 255);
+    push_u16(out, timing.projector_duty_cycle_pwm);
+    push_u16(out, timing.bottom_layer_projector_duty_cycle_pwm);
     push_u32(out, build.layer_xor_key);
     push_u32(out, slicer_offset);
     push_u32(out, slicer_size);
@@ -305,6 +305,8 @@ fn write_layer_def_ex(
         }
     };
 
+    let is_bottom_wait = (layer.index as u32) < timing.wait_time_bottom_layer_count;
+
     // Use bottom lift distance for bottom layers, normal for others
     let lift_distance = if is_bottom {
         timing.bottom_lift_distance_mm
@@ -336,20 +338,25 @@ fn write_layer_def_ex(
     } else {
         timing.retract_speed2_mm_min
     };
-    let wait_time_after_cure = if is_bottom {
+    let wait_time_after_cure = if is_bottom_wait {
         timing.bottom_wait_time_after_cure_sec
     } else {
         timing.wait_time_after_cure_sec
     };
-    let wait_time_after_lift = if is_bottom {
+    let wait_time_after_lift = if is_bottom_wait {
         timing.bottom_wait_time_after_lift_sec
     } else {
         timing.wait_time_after_lift_sec
     };
-    let wait_time_before_cure = if is_bottom {
+    let wait_time_before_cure = if is_bottom_wait {
         timing.bottom_wait_time_before_cure_sec
     } else {
         timing.wait_time_before_cure_sec
+    };
+    let projector_duty_cycle_pwm = if is_bottom {
+        timing.bottom_layer_projector_duty_cycle_pwm
+    } else {
+        timing.projector_duty_cycle_pwm
     };
 
     // Per-layer CTBv4/v5 semantics follow Chitubox/UVtools LayerDefEx:
@@ -373,7 +380,7 @@ fn write_layer_def_ex(
     push_f32(out, clamp_non_negative(wait_time_after_cure));
     push_f32(out, clamp_non_negative(wait_time_after_lift));
     push_f32(out, clamp_non_negative(wait_time_before_cure));
-    push_f32(out, 255.0);
+    push_f32(out, clamp_non_negative(projector_duty_cycle_pwm as f32));
 }
 
 fn compute_print_time_seconds(prepared_count: usize, timing: CtbTimingModel) -> u32 {

@@ -6,6 +6,7 @@ import { CTB_PLUGIN_MANIFEST } from './pluginManifest';
 import { CTB_FORMAT_DEFINITION } from './slicing/ctbFormatDefinition';
 import ctbSimpleMaterialSettings from './materialSettings/settings_simple.json';
 import ctbTwostageMaterialSettings from './materialSettings/settings_twostage.json';
+import ctbBetaSimpleMaterialSettings from './materialSettings/settings_betaonestep.json';
 
 type CtbModeSettingsSchema = Omit<PluginLocalMaterialSettingsAdapterContract, 'outputFormat'>;
 
@@ -22,6 +23,10 @@ const CTB_LOCAL_MATERIAL_SETTINGS_SIMPLE_ADAPTER = createCtbModeSettingsAdapter(
 
 const CTB_LOCAL_MATERIAL_SETTINGS_TWOSTAGE_ADAPTER = createCtbModeSettingsAdapter(
   ctbTwostageMaterialSettings as CtbModeSettingsSchema,
+);
+
+const CTB_LOCAL_MATERIAL_SETTINGS_BETA_SIMPLE_ADAPTER = createCtbModeSettingsAdapter(
+  ctbBetaSimpleMaterialSettings as CtbModeSettingsSchema,
 );
 
 export const CTB_COMPLEX_PLUGIN_DEFINITION: ComplexPluginDefinition = {
@@ -43,6 +48,7 @@ export const CTB_COMPLEX_PLUGIN_DEFINITION: ComplexPluginDefinition = {
     [CTB_FORMAT_DEFINITION.outputFormat]: {
       simple: CTB_LOCAL_MATERIAL_SETTINGS_SIMPLE_ADAPTER,
       twostage: CTB_LOCAL_MATERIAL_SETTINGS_TWOSTAGE_ADAPTER,
+      betaonestep: CTB_LOCAL_MATERIAL_SETTINGS_BETA_SIMPLE_ADAPTER,
     },
   },
 };

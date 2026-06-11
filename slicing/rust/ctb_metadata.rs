@@ -88,9 +88,12 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
             wait_time_before_cure_sec: 0.0,
             wait_time_after_cure_sec: 0.0,
             wait_time_after_lift_sec: 0.0,
+            wait_time_bottom_layer_count: 0,
             bottom_wait_time_before_cure_sec: 0.0,
             bottom_wait_time_after_cure_sec: 0.0,
             bottom_wait_time_after_lift_sec: 0.0,
+            projector_duty_cycle_pwm: 0,
+            bottom_layer_projector_duty_cycle_pwm: 0,
         };
     };
 
@@ -135,6 +138,10 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         })
         .map(|v| v.trim().to_ascii_lowercase());
     let is_simple_mode = matches!(settings_mode.as_deref(), Some("simple"));
+
+    // Beta one step for S4U tilting + bottom wait times 
+    let is_beta_simple_mode = matches!(settings_mode.as_deref(), Some("betaonestep"));
+
 
     let read_f32 = |key: &str| {
         ctb.and_then(|m| m.get(key))
@@ -188,9 +195,12 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         wait_time_before_cure_sec: read_f32("waitTimeBeforeCureSec"),
         wait_time_after_cure_sec: read_f32("waitTimeAfterCureSec"),
         wait_time_after_lift_sec: read_f32("waitTimeAfterLiftSec"),
+        wait_time_bottom_layer_count: read_u32("waitTimeBottomLayerCount"),
         bottom_wait_time_before_cure_sec: read_f32("bottomWaitTimeBeforeCureSec"),
         bottom_wait_time_after_cure_sec: read_f32("bottomWaitTimeAfterCureSec"),
         bottom_wait_time_after_lift_sec: read_f32("bottomWaitTimeAfterLiftSec"),
+        projector_duty_cycle_pwm: ((read_u32("projectorPwmPercent") as f32) * 2.55) as u16,
+        bottom_layer_projector_duty_cycle_pwm : ((read_u32("bottomProjectorPwmPercent") as f32) * 2.55) as u16,
     };
 
     let sanitize_non_negative = |value: f32| {
@@ -228,6 +238,13 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
     timing.bottom_wait_time_after_cure_sec = sanitize_non_negative(timing.bottom_wait_time_after_cure_sec);
     timing.bottom_wait_time_after_lift_sec = sanitize_non_negative(timing.bottom_wait_time_after_lift_sec);
 
+    if timing.projector_duty_cycle_pwm <= 0 {
+        timing.projector_duty_cycle_pwm = 255;
+    }
+    if timing.bottom_layer_projector_duty_cycle_pwm <= 0 {
+        timing.bottom_layer_projector_duty_cycle_pwm = 255;
+    }
+
     if timing.lift_distance2_mm <= 0.0 {
         timing.lift_distance2_mm = timing.lift_distance_mm;
     }
@@ -264,6 +281,10 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         timing.bottom_retract_height2_mm = timing.retract_distance2_mm;
     }
 
+    if timing.wait_time_bottom_layer_count < timing.bottom_layer_count {
+        timing.wait_time_bottom_layer_count = timing.bottom_layer_count;
+    }
+
     if is_simple_mode {
         timing.lift_distance2_mm = 0.0;
         timing.lift_speed2_mm_min = 0.0;
@@ -277,6 +298,17 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         timing.bottom_wait_time_after_cure_sec = 0.0;
         timing.bottom_wait_time_after_lift_sec = 0.0;
         timing.bottom_wait_time_before_cure_sec = 0.0;
+    }
+
+    if is_beta_simple_mode {
+        timing.lift_distance2_mm = 0.0;
+        timing.lift_speed2_mm_min = 0.0;
+        timing.retract_distance2_mm = 0.0;
+        timing.retract_speed2_mm_min = 0.0;
+        timing.bottom_lift_distance2_mm = 0.0;
+        timing.bottom_lift_speed2_mm_min = 0.0;
+        timing.bottom_retract_speed2_mm_min = 0.0;
+        timing.bottom_retract_height2_mm = 0.0;
     }
 
     timing
