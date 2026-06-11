@@ -23,17 +23,51 @@ use super::ctb_types::{
 use sha2::{Digest, Sha256};
 use super::ctb_crypto::{ctb_default_key_iv, ctb_encrypt_in_place_no_padding};
 
-fn ctb_magic_for_version(version: u32, is_encrypted: bool) -> u32 {
-    if version >= 4 {
-        if is_encrypted { CTB_MAGIC_V5_ENCRYPTED } 
-        else { CTB_MAGIC_V4_V5 }
-    } else {
-        CTB_MAGIC_V2_V3
+struct CtbVersionCaps {
+    magic: u32,
+    extended_layer_def: bool,
+    print_params_v4: bool,
+    /// V5+: write ResinParameters block and null-terminate all metadata strings.
+    resin_params: bool,
+    per_layer_settings_active_flag: u8,
+}
+
+fn ctb_version_caps(version: u32) -> CtbVersionCaps {
+    match version.clamp(2, 5) {
+        2 => CtbVersionCaps {
+            magic: CTB_MAGIC_V2_V3,
+            extended_layer_def: false,
+            print_params_v4: false,
+            resin_params: false,
+            per_layer_settings_active_flag: 0x20,
+        },
+        3 => CtbVersionCaps {
+            magic: CTB_MAGIC_V2_V3,
+            extended_layer_def: true,
+            print_params_v4: false,
+            resin_params: false,
+            per_layer_settings_active_flag: 0x30,
+        },
+        4 => CtbVersionCaps {
+            magic: CTB_MAGIC_V4_V5,
+            extended_layer_def: true,
+            print_params_v4: true,
+            resin_params: false,
+            per_layer_settings_active_flag: 0x40,
+        },
+        _ => CtbVersionCaps {
+            magic: CTB_MAGIC_V4_V5,
+            extended_layer_def: true,
+            print_params_v4: true,
+            resin_params: true,
+            per_layer_settings_active_flag: 0x50,
+        },
     }
 }
 
 fn write_ctb_header(
     out: &mut Vec<u8>,
+    magic: u32,
     version: u32,
     job: &SliceJobV3,
     layer_count: u32,
@@ -45,9 +79,8 @@ fn write_ctb_header(
     print_time_sec: u32,
     slicer_offset: u32,
     slicer_size: u32,
-    is_encrypted: bool,
 ) {
-    push_u32(out, ctb_magic_for_version(version, is_encrypted));
+    push_u32(out, magic);
     push_u32(out, version);
     push_f32(out, job.build_width_mm);
     push_f32(out, job.build_depth_mm);
@@ -108,6 +141,7 @@ fn write_ctb_slicer_info_fixed(
     machine_name_offset: u32,
     machine_name_size: u32,
     print_parameters_v4_address: u32,
+    per_layer_settings_flag: u8,
 ) {
     // CTB v4/v5 slicer-info fields (UVTools/ChiTuBox semantics):
     //   [0] BottomLiftHeight2, [1] BottomLiftSpeed2,
@@ -135,22 +169,7 @@ fn write_ctb_slicer_info_fixed(
     );
     push_u16(out, 0);
 
-    // Activate per layer settings in CTB for v5 or v4
-    // 0x50 for CTBv5
-    // 0x40 for CTBv4
-    // 0x00 Disabled
-    push_u8(
-        out,
-        if build.per_layer_settings {
-            if build.version >= 5 {
-                0x50
-            } else {
-                0x40
-            }
-        } else {
-            0x00
-        },
-    );
+    push_u8(out, per_layer_settings_flag);
 
     push_u32(out, build.modified_date_unix / 60);
     push_u32(out, build.anti_alias_level);
@@ -198,12 +217,13 @@ fn prepare_resin_payload(
     build: &CtbBuildModel,
     resin: &CtbResinModel,
     aes_enabled: bool,
+    resin_params: bool,
 ) -> CtbResinPayload {
     let mut machine_name_bytes = build.machine_name.as_bytes().to_vec();
     let mut resin_type_bytes = resin.resin_type.as_bytes().to_vec();
     let mut resin_name_bytes = resin.resin_name.as_bytes().to_vec();
 
-    if build.version >= 5 {
+    if resin_params {
         if !machine_name_bytes.ends_with(&[0]) {
             machine_name_bytes.push(0);
         }
@@ -272,25 +292,27 @@ fn write_ctb_resin_parameters(
     }
 }
 
+enum LayerDefLayout {
+    Basic,     // V2: 36-byte def, no extended fields
+    Extended,  // V3+: 84-byte def with extended fields
+    Encrypted, // All encrypted versions: 88-byte def, different field ordering
+}
+
 fn write_layer_def_ex(
     out: &mut Vec<u8>,
     layer: &CtbPreparedLayer,
-    //layer_def_bytes: &[u8],
     position_z_mm: f32,
     timing: CtbTimingModel,
     layer_data_abs_offset: u64,
-    build_version: u8,
+    layout: LayerDefLayout,
     is_bottom: bool,
-    is_encrypted: bool,
 ) {
     let (page_number, data_offset) = page_number_and_offset(layer_data_abs_offset);
-    
-    let table_size = if is_encrypted {
-        CTB_ENCRYPTED_LAYER_DEF_SIZE
-    } else if build_version >= 3 {
-        CTB_LAYER_DEF_EX_SIZE
-    } else {
-        CTB_LAYER_DEF_SIZE
+
+    let table_size = match layout {
+        LayerDefLayout::Encrypted => CTB_ENCRYPTED_LAYER_DEF_SIZE,
+        LayerDefLayout::Extended  => CTB_LAYER_DEF_EX_SIZE,
+        LayerDefLayout::Basic     => CTB_LAYER_DEF_SIZE,
     };
 
     let clamp_non_negative = |value: f32| {
@@ -374,30 +396,32 @@ fn write_layer_def_ex(
     let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
     
     
-    if is_encrypted {
-        push_u32(out, table_size);
-        push_f32(out, position_z_mm);
-        push_f32(out, exposure_sec);
-        push_f32(out, light_off_sec);
-        push_u32(out, data_offset);
-        push_u32(out, page_number);
-        push_u32(out, layer.encoded.len() as u32);
-        push_u32(out, 0); push_u32(out, 0); push_u32(out, 0);
-    } else {
-        // Basic layer def (merged from write_layer_def)
-        push_f32(out, position_z_mm);
-        push_f32(out, exposure_sec);
-        push_f32(out, light_off_sec);
-        push_u32(out, data_offset);
-        push_u32(out, layer.encoded.len() as u32);
-        push_u32(out, page_number);
-        push_u32(out, table_size);
-        push_u32(out, 0); push_u32(out, 0);
-
-        if build_version < 3 {
-            return; // v2: basic def only, no extended timing
+    match layout {
+        LayerDefLayout::Encrypted => {
+            push_u32(out, table_size);
+            push_f32(out, position_z_mm);
+            push_f32(out, exposure_sec);
+            push_f32(out, light_off_sec);
+            push_u32(out, data_offset);
+            push_u32(out, page_number);
+            push_u32(out, layer.encoded.len() as u32);
+            push_u32(out, 0); push_u32(out, 0); push_u32(out, 0);
         }
-        push_u32(out, table_size + layer.encoded.len() as u32);
+        LayerDefLayout::Basic | LayerDefLayout::Extended => {
+            push_f32(out, position_z_mm);
+            push_f32(out, exposure_sec);
+            push_f32(out, light_off_sec);
+            push_u32(out, data_offset);
+            push_u32(out, layer.encoded.len() as u32);
+            push_u32(out, page_number);
+            push_u32(out, table_size);
+            push_u32(out, 0); push_u32(out, 0);
+
+            if matches!(layout, LayerDefLayout::Basic) {
+                return;
+            }
+            push_u32(out, table_size + layer.encoded.len() as u32);
+        }
     }
 
     push_f32(out, lift_height_total);
@@ -413,7 +437,7 @@ fn write_layer_def_ex(
     push_f32(out, clamp_non_negative(projector_duty_cycle_pwm as f32)); //test as u32/u16
 
     
-    if is_encrypted { push_u32(out, 0); }
+    if matches!(layout, LayerDefLayout::Encrypted) { push_u32(out, 0); }
 }
 
 fn compute_print_time_seconds(prepared_count: usize, timing: CtbTimingModel) -> u32 {
@@ -446,12 +470,13 @@ pub(super) fn build_ctb_container_bytes_with_progress(
 ) -> Result<Vec<u8>, SlicerV3Error> {
     let timing = parse_timing_model_from_metadata(&job.metadata_json);
     let build = parse_ctb_build_model_from_job(job);
+    let caps = ctb_version_caps(build.version);
     let resin = parse_ctb_resin_model_from_job(job, &build.machine_name);
 
     let previews = build_previews(job)?;
 
     let mut machine_name_bytes = build.machine_name.as_bytes().to_vec();
-    if build.version >= 5 && !machine_name_bytes.ends_with(&[0]) {
+    if caps.resin_params && !machine_name_bytes.ends_with(&[0]) {
         machine_name_bytes.push(0);
     }
     let machine_name_size = machine_name_bytes.len() as u32;
@@ -480,7 +505,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
 
     let disclaimer_bytes = decode_embedded_disclaimer_bytes()?;
 
-    let resin_payload = prepare_resin_payload(&build, &resin, false);
+    let resin_payload = prepare_resin_payload(&build, &resin, false, caps.resin_params);
 
     let mut extended_offsets = CtbExtendedOffsets {
         disclaimer_offset: 0,
@@ -489,7 +514,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         resin_parameters_offset: 0,
     };
 
-    if build.version >= 4 {
+    if caps.print_params_v4 {
         extended_offsets.disclaimer_offset = offset;
         extended_offsets.disclaimer_length = CTB_DISCLAIMER_SIZE as u32;
         offset += CTB_DISCLAIMER_SIZE as u32;
@@ -497,7 +522,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         extended_offsets.print_parameters_v4_offset = offset;
         offset += CTB_PRINT_PARAMETERS_V4_SIZE;
 
-        if build.version >= 5 {
+        if caps.resin_params {
             extended_offsets.resin_parameters_offset = offset;
             offset += resin_payload_len(&resin_payload);
         }
@@ -518,6 +543,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
     let mut out = Vec::new();
     write_ctb_header(
         &mut out,
+        caps.magic,
         build.version,
         job,
         layer_count,
@@ -529,7 +555,6 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         print_time_sec,
         slicer_offset,
         slicer_size,
-        false,
     );
 
     assert_eq!(out.len(), CTB_HEADER_SIZE as usize);
@@ -558,6 +583,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         print_parameters_offset as usize + CTB_PRINT_PARAMETERS_SIZE as usize
     );
 
+    let pls_flag = if build.per_layer_settings { caps.per_layer_settings_active_flag } else { 0x00 };
     write_ctb_slicer_info_fixed(
         &mut out,
         &build,
@@ -565,6 +591,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         machine_name_offset,
         machine_name_size,
         extended_offsets.print_parameters_v4_offset,
+        pls_flag,
     );
     assert_eq!(out.len(), slicer_offset as usize + slicer_size as usize);
 
@@ -574,7 +601,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         machine_name_offset as usize + machine_name_size as usize
     );
 
-    if build.version >= 4 {
+    if caps.print_params_v4 {
         push_bytes_padded(&mut out, &disclaimer_bytes, CTB_DISCLAIMER_SIZE);
         assert_eq!(
             out.len(),
@@ -588,7 +615,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
                 + CTB_PRINT_PARAMETERS_V4_SIZE as usize
         );
 
-        if build.version >= 5 {
+        if caps.resin_params {
             write_ctb_resin_parameters(
                 &mut out,
                 extended_offsets.resin_parameters_offset,
@@ -612,7 +639,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
     let total_prepared = prepared.len() as u32;
     for (idx, layer) in prepared.iter().enumerate() {
         let layer_data_blob_abs = layer_data_start_abs + (layer_payload_data.len() as u64);
-        let layer_data_abs = if build.version >= 3 {
+        let layer_data_abs = if caps.extended_layer_def {
             layer_data_blob_abs + CTB_LAYER_DEF_EX_SIZE as u64
         } else {
             layer_data_blob_abs
@@ -623,18 +650,18 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         let mut layer_def_bytes = Vec::new();
 
         let is_bottom = (layer.index as u32) < timing.bottom_layer_count;
+        let layout = if caps.extended_layer_def { LayerDefLayout::Extended } else { LayerDefLayout::Basic };
         write_layer_def_ex(
             &mut layer_def_bytes,
             layer,
             position_z_mm,
             timing,
             layer_data_abs,
-            build.version as u8,
+            layout,
             is_bottom,
-            false,
         );
 
-        if build.version >= 3 {
+        if caps.extended_layer_def {
             layer_defs_data.extend_from_slice(&layer_def_bytes[..CTB_LAYER_DEF_SIZE as usize]);
             layer_payload_data.extend_from_slice(&layer_def_bytes);
         } else {
@@ -654,6 +681,124 @@ pub(super) fn build_ctb_container_bytes_with_progress(
     Ok(out)
 }
 
+fn write_encrypted_settings(
+    out: &mut Vec<u8>,
+    build: &CtbBuildModel,
+    job: &SliceJobV3,
+    timing: CtbTimingModel,
+    layer_count: u32,
+    print_time_sec: u32,
+    large_preview_offset: u32,
+    small_preview_offset: u32,
+    machine_name_offset: u32,
+    machine_name_size: u32,
+    disclaimer_offset: u32,
+    resin_parameters_address: u32,
+    layer_pointers_offset: u32,
+    checksum_value: u64,
+) {
+    // CTB print-parameter lift heights are TOTAL heights (stage1 + stage2).
+    let bottom_lift_total_mm = timing.bottom_lift_distance_mm + timing.bottom_lift_distance2_mm;
+    let lift_total_mm = timing.lift_distance_mm + timing.lift_distance2_mm;
+
+    push_u64(out, checksum_value);
+    push_u32(out, layer_pointers_offset);
+    push_f32(out, job.build_width_mm);
+    push_f32(out, job.build_depth_mm);
+    push_f32(out, build.bed_size_z_mm.max(0.0));
+    push_u32(out, build.created_date_unix);
+    push_u32(out, build.modified_date_unix);
+    push_f32(out, job.layer_height_mm * layer_count as f32);
+    push_f32(out, job.layer_height_mm);
+    push_f32(out, timing.normal_exposure_sec);
+    push_f32(out, timing.bottom_exposure_sec);
+    push_f32(out, timing.light_off_delay_sec);
+    push_u32(out, timing.bottom_layer_count);
+    push_u32(out, job.source_width_px);
+    push_u32(out, job.source_height_px);
+    push_u32(out, layer_count);
+    push_u32(out, large_preview_offset);
+    push_u32(out, small_preview_offset);
+    push_u32(out, print_time_sec);
+    push_u32(out, build.projector_type);
+    push_f32(out, bottom_lift_total_mm.max(0.0));
+    push_f32(out, timing.bottom_lift_speed_mm_min);
+    push_f32(out, lift_total_mm.max(0.0));
+    push_f32(out, timing.lift_speed_mm_min);
+    push_f32(out, timing.retract_speed_mm_min);
+    push_f32(out, timing.retract_distance_mm);
+    push_f32(out, timing.retract_distance2_mm);
+    push_f32(out, timing.retract_speed2_mm_min);
+    push_f32(out, timing.bottom_light_off_delay_sec);
+    push_u32(out, 1);
+    push_u16(out, timing.projector_duty_cycle_pwm);
+    push_u16(out, timing.bottom_layer_projector_duty_cycle_pwm);
+    push_u32(out, build.layer_xor_key);
+    // Slots: BottomLiftHeight2, BottomLiftSpeed2, LiftHeight2, LiftSpeed2, RetractHeight2, RetractSpeed2.
+    push_f32(out, timing.bottom_lift_distance2_mm);
+    push_f32(out, timing.bottom_lift_speed2_mm_min);
+    push_f32(out, timing.lift_distance2_mm);
+    push_f32(out, timing.lift_speed2_mm_min);
+    push_f32(out, timing.retract_distance2_mm);
+    push_f32(out, timing.retract_speed2_mm_min);
+    push_f32(out, timing.wait_time_after_lift_sec);
+    push_u32(out, machine_name_offset);
+    push_u32(out, machine_name_size);
+    push_u8(out, if build.anti_alias_level > 1 { 0x0f } else { 0x07 });
+    push_u16(out, 0);
+    push_u8(out, if build.per_layer_settings { 0x40 } else { 0x00 });
+    push_u32(out, build.modified_date_unix / 60);
+    push_u32(out, build.anti_alias_level);
+    push_f32(out, timing.wait_time_before_cure_sec);
+    push_f32(out, timing.wait_time_after_lift_sec);
+    push_u32(out, timing.transition_layer_count);
+    push_f32(out, timing.bottom_retract_speed_mm_min);
+    push_f32(out, timing.bottom_retract_speed2_mm_min);
+    push_u32(out, 0);
+    push_f32(out, timing.retract_distance_mm.max(0.0));
+    push_u32(out, 0);
+    push_f32(out, timing.retract_distance2_mm.max(0.0));
+    push_f32(out, timing.wait_time_before_cure_sec);
+    push_f32(out, timing.wait_time_after_lift_sec);
+    push_f32(out, timing.wait_time_after_cure_sec);
+    push_f32(out, timing.bottom_retract_height2_mm);
+    push_u32(out, 0);
+    push_u32(out, 0);
+    push_u32(out, 4);
+    push_u32(out, layer_count.saturating_sub(1));
+    push_u32(out, 0);
+    push_u32(out, 0);
+    push_u32(out, 0);
+    push_u32(out, 0);
+    push_u32(out, disclaimer_offset);
+    push_u32(out, CTB_DISCLAIMER_SIZE as u32);
+    push_u32(out, 0);
+    push_u32(out, resin_parameters_address);
+    push_u32(out, 0);
+    push_u32(out, 0);
+}
+
+fn write_encrypted_header(
+    out: &mut Vec<u8>,
+    version: u32,
+    signature_len: u32,
+    signature_offset: u32,
+) {
+    push_u32(out, CTB_MAGIC_V5_ENCRYPTED);
+    push_u32(out, CTB_ENCRYPTED_SETTINGS_SIZE);
+    push_u32(out, CTB_ENCRYPTED_SETTINGS_OFFSET);
+    push_u32(out, 0);
+    push_u32(out, version);
+    push_u32(out, signature_len);
+    push_u32(out, signature_offset);
+    push_u32(out, 0);
+    push_u16(out, 1);
+    push_u16(out, 1);
+    push_u32(out, 0);
+    push_u32(out, 42);
+    push_u32(out, 0);
+}
+
 pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     job: &SliceJobV3,
     prepared: &[CtbPreparedLayer],
@@ -661,68 +806,29 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
 ) -> Result<Vec<u8>, SlicerV3Error> {
     let timing = parse_timing_model_from_metadata(&job.metadata_json);
     let mut build = parse_ctb_build_model_from_job(job);
-    build.version = 5;
+    // Encrypted format supports V3–V5; clamp to that range, defaulting to V5.
+    if build.version < 3 || build.version > 5 {
+        build.version = 5;
+    }
+    let caps = ctb_version_caps(build.version);
     let resin = parse_ctb_resin_model_from_job(job, &build.machine_name);
     let previews = build_previews(job)?;
     let disclaimer_bytes = decode_embedded_disclaimer_bytes()?;
+    let (key, iv) = ctb_default_key_iv();
 
     let layer_count = prepared.len() as u32;
-    let print_time_sec = {
-        let mut total = 0.0_f32;
-        for i in 0..prepared.len() {
-            let is_bottom = (i as u32) < timing.bottom_layer_count;
-            let exposure = if is_bottom {
-                timing.bottom_exposure_sec
-            } else {
-                timing.normal_exposure_sec
-            };
-            let light_off = if is_bottom {
-                timing.bottom_light_off_delay_sec
-            } else {
-                timing.light_off_delay_sec
-            };
-            total += exposure.max(0.0)
-                + light_off.max(0.0)
-                + timing.lift_distance_mm.max(0.0)
-                + timing.retract_speed_mm_min.max(0.0) * 0.0;
-        }
-        total.round().max(0.0) as u32
-    };
-
+    let print_time_sec = compute_print_time_seconds(prepared.len(), timing);
     let machine_name_bytes = build.machine_name.as_bytes().to_vec();
     let machine_name_size = machine_name_bytes.len() as u32;
-
-    let mut resin_type_bytes = resin.resin_type.as_bytes().to_vec();
-    let mut resin_name_bytes = resin.resin_name.as_bytes().to_vec();
-    if resin_type_bytes.is_empty() {
-        resin_type_bytes = b"Standard".to_vec();
-    }
-    if resin_name_bytes.is_empty() {
-        resin_name_bytes = b"DragonFruit Resin".to_vec();
-    }
 
     let mut out = vec![0u8; (CTB_ENCRYPTED_HEADER_SIZE + CTB_ENCRYPTED_SETTINGS_SIZE) as usize];
 
     let large_preview_offset = out.len() as u32;
-    let large_preview_image_offset = large_preview_offset + CTB_PREVIEW_RECORD_SIZE;
-    write_preview_record(
-        &mut out,
-        previews[0].width,
-        previews[0].height,
-        large_preview_image_offset,
-        previews[0].encoded.len() as u32,
-    );
+    write_preview_record(&mut out, previews[0].width, previews[0].height, large_preview_offset + CTB_PREVIEW_RECORD_SIZE, previews[0].encoded.len() as u32);
     out.extend_from_slice(&previews[0].encoded);
 
     let small_preview_offset = out.len() as u32;
-    let small_preview_image_offset = small_preview_offset + CTB_PREVIEW_RECORD_SIZE;
-    write_preview_record(
-        &mut out,
-        previews[1].width,
-        previews[1].height,
-        small_preview_image_offset,
-        previews[1].encoded.len() as u32,
-    );
+    write_preview_record(&mut out, previews[1].width, previews[1].height, small_preview_offset + CTB_PREVIEW_RECORD_SIZE, previews[1].encoded.len() as u32);
     out.extend_from_slice(&previews[1].encoded);
 
     let machine_name_offset = out.len() as u32;
@@ -738,28 +844,18 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     }
     out.extend_from_slice(&disclaimer_padded);
 
-    let resin_parameters_address = out.len() as u32;
-    let resin_fixed_size = 40u32;
-    let resin_type_address = resin_parameters_address + resin_fixed_size;
-    let resin_name_address = resin_type_address + resin_type_bytes.len() as u32;
-    let resin_machine_name_address = resin_name_address + resin_name_bytes.len() as u32;
-
-    push_u32(&mut out, 0);
-    push_u8(&mut out, resin.color_rgba[2]);
-    push_u8(&mut out, resin.color_rgba[1]);
-    push_u8(&mut out, resin.color_rgba[0]);
-    push_u8(&mut out, resin.color_rgba[3]);
-    push_u32(&mut out, resin_machine_name_address);
-    push_u32(&mut out, resin_type_bytes.len() as u32);
-    push_u32(&mut out, resin_type_address);
-    push_u32(&mut out, resin_name_bytes.len() as u32);
-    push_u32(&mut out, resin_name_address);
-    push_u32(&mut out, machine_name_size);
-    push_f32(&mut out, resin.resin_density);
-    push_u32(&mut out, 0);
-    out.extend_from_slice(&resin_type_bytes);
-    out.extend_from_slice(&resin_name_bytes);
-    out.extend_from_slice(&machine_name_bytes);
+    // V5enc only: ResinParameters block (resin color, type, name, density).
+    let resin_parameters_address = if caps.resin_params {
+        let mut enc_resin = resin.clone();
+        if enc_resin.resin_type.is_empty() { enc_resin.resin_type = "Standard".to_string(); }
+        if enc_resin.resin_name.is_empty() { enc_resin.resin_name = "DragonFruit Resin".to_string(); }
+        let payload = prepare_resin_payload(&build, &enc_resin, false, false);
+        let addr = out.len() as u32;
+        write_ctb_resin_parameters(&mut out, addr, &payload, &enc_resin);
+        addr
+    } else {
+        0u32
+    };
 
     let layer_pointers_offset = out.len() as u32;
     let layer_pointer_table_size = layer_count as usize * 16;
@@ -775,16 +871,7 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
         layer_pointer_entries.push((layer_offset, layer_page));
 
         let is_bottom = (layer.index as u32) < timing.bottom_layer_count;
-        write_layer_def_ex(
-            &mut out,
-            layer,
-            (layer.index as f32 + 1.0) * job.layer_height_mm,
-            timing,
-            layer_data_abs,
-            5,
-            is_bottom,
-            true
-        );
+        write_layer_def_ex(&mut out, layer, (layer.index as f32 + 1.0) * job.layer_height_mm, timing, layer_data_abs, LayerDefLayout::Encrypted, is_bottom);
         out.extend_from_slice(&layer.encoded);
 
         if let Some(progress) = on_progress {
@@ -792,17 +879,22 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
         }
     }
 
-    push_u32(&mut out, 1_109_414_650);
-    push_u32(&mut out, 0);
+    // V5enc only: 8-byte post-layer footer required by firmware.
+    if caps.resin_params {
+        push_u32(&mut out, 1_109_414_650);
+        push_u32(&mut out, 0);
+    }
 
     let checksum_value: u64 = 0xCAFE_BABE;
     let checksum_hash = Sha256::digest(checksum_value.to_le_bytes());
     let mut signature = checksum_hash.to_vec();
-    let (key, iv) = ctb_default_key_iv();
     ctb_encrypt_in_place_no_padding(&mut signature, &key, &iv)?;
     let signature_offset = out.len() as u32;
     out.extend_from_slice(&signature);
-    push_u32(&mut out, 1_833_054_899);
+    // V4enc+: 4-byte trailing marker.
+    if caps.print_params_v4 {
+        push_u32(&mut out, 1_833_054_899);
+    }
 
     for (i, (layer_offset, layer_page)) in layer_pointer_entries.iter().enumerate() {
         let base = layer_pointers_table_start + i * 16;
@@ -813,131 +905,23 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     }
 
     let mut settings = Vec::with_capacity(CTB_ENCRYPTED_SETTINGS_SIZE as usize);
-    push_u64(&mut settings, checksum_value);
-    push_u32(&mut settings, layer_pointers_offset);
-    push_f32(&mut settings, job.build_width_mm);
-    push_f32(&mut settings, job.build_depth_mm);
-    push_f32(&mut settings, build.bed_size_z_mm.max(0.0));
-    push_u32(&mut settings, build.created_date_unix);
-    push_u32(&mut settings, build.modified_date_unix);
-    push_f32(&mut settings, job.layer_height_mm * layer_count as f32);
-    push_f32(&mut settings, job.layer_height_mm);
-    push_f32(&mut settings, timing.normal_exposure_sec);
-    push_f32(&mut settings, timing.bottom_exposure_sec);
-    push_f32(&mut settings, timing.light_off_delay_sec);
-    push_u32(&mut settings, timing.bottom_layer_count);
-    push_u32(&mut settings, job.source_width_px);
-    push_u32(&mut settings, job.source_height_px);
-    push_u32(&mut settings, layer_count);
-    push_u32(&mut settings, large_preview_offset); // not_included
-    push_u32(&mut settings, small_preview_offset); // preview_offsets
-    push_u32(&mut settings, print_time_sec);
-    push_u32(&mut settings, build.projector_type);
-    // CTB print-parameter lift heights are TOTAL heights (stage1 + stage2).
-    // UVTools/ChiTuBox derive stage1 lift height as (total_height - stage2_height).
-    let bottom_lift_total_mm = timing.bottom_lift_distance_mm + timing.bottom_lift_distance2_mm;
-    let lift_total_mm = timing.lift_distance_mm + timing.lift_distance2_mm;
-
-    push_f32(&mut settings, bottom_lift_total_mm.max(0.0));
-    push_f32(&mut settings, timing.bottom_lift_speed_mm_min);
-    push_f32(&mut settings, lift_total_mm.max(0.0));
-    push_f32(&mut settings, timing.lift_speed_mm_min);
-    push_f32(&mut settings, timing.retract_speed_mm_min);
-    push_f32(&mut settings, timing.retract_distance_mm);
-    push_f32(&mut settings, timing.retract_distance2_mm);
-    push_f32(&mut settings, timing.retract_speed2_mm_min);
-    push_f32(&mut settings, timing.bottom_light_off_delay_sec);
-    push_u32(&mut settings, 1);
-    push_u16(&mut settings, timing.projector_duty_cycle_pwm); // Normal layer PWM
-    push_u16(&mut settings, timing.bottom_layer_projector_duty_cycle_pwm); // Bottom layer PWM
-    push_u32(&mut settings, build.layer_xor_key);
-    // CTB encrypted slicer settings map these slots to:
-    //   BottomLiftHeight2, BottomLiftSpeed2, LiftHeight2, LiftSpeed2,
-    //   RetractHeight2, RetractSpeed2.
-    push_f32(&mut settings, timing.bottom_lift_distance2_mm);
-    push_f32(&mut settings, timing.bottom_lift_speed2_mm_min);
-    push_f32(&mut settings, timing.lift_distance2_mm);
-    push_f32(&mut settings, timing.lift_speed2_mm_min);
-    push_f32(&mut settings, timing.retract_distance2_mm);
-    push_f32(&mut settings, timing.retract_speed2_mm_min);
-    push_f32(&mut settings, timing.wait_time_after_lift_sec);
-    push_u32(&mut settings, machine_name_offset);
-    push_u32(&mut settings, machine_name_size);
-    push_u8(
-        &mut settings,
-        if build.anti_alias_level > 1 {
-            0x0f
-        } else {
-            0x07
-        },
-    );
-    push_u16(&mut settings, 0);
-    push_u8(
-        &mut settings,
-        if build.per_layer_settings { 0x50 } else { 0x00 },
-    );
-    push_u32(&mut settings, build.modified_date_unix / 60);
-    push_u32(&mut settings, build.anti_alias_level);
-    push_f32(&mut settings, timing.wait_time_before_cure_sec);
-    push_f32(&mut settings, timing.wait_time_after_lift_sec);
-    push_u32(&mut settings, timing.transition_layer_count);
-    push_f32(&mut settings, timing.bottom_retract_speed_mm_min);
-    push_f32(&mut settings, timing.bottom_retract_speed2_mm_min);
-    push_u32(&mut settings, 0);
-    push_f32(&mut settings, timing.retract_distance_mm.max(0.0));
-    push_u32(&mut settings, 0);
-    push_f32(&mut settings, timing.retract_distance2_mm.max(0.0));
-    push_f32(&mut settings, timing.wait_time_before_cure_sec);
-    push_f32(&mut settings, timing.wait_time_after_lift_sec);
-    push_f32(&mut settings, timing.wait_time_after_cure_sec);
-    push_f32(&mut settings, timing.bottom_retract_height2_mm);
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, 4);
-    push_u32(&mut settings, layer_count.saturating_sub(1));
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, disclaimer_offset);
-    push_u32(&mut settings, CTB_DISCLAIMER_SIZE as u32);
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, resin_parameters_address);
-    push_u32(&mut settings, 0);
-    push_u32(&mut settings, 0);
-
+    write_encrypted_settings(&mut settings, &build, job, timing, layer_count, print_time_sec, large_preview_offset, small_preview_offset, machine_name_offset, machine_name_size, disclaimer_offset, resin_parameters_address, layer_pointers_offset, checksum_value);
     if settings.len() != CTB_ENCRYPTED_SETTINGS_SIZE as usize {
         return Err(SlicerV3Error::UnsupportedOutput(format!(
             "internal encrypted CTB settings size mismatch: expected {}, got {}",
-            CTB_ENCRYPTED_SETTINGS_SIZE,
-            settings.len()
+            CTB_ENCRYPTED_SETTINGS_SIZE, settings.len()
         )));
     }
-
     ctb_encrypt_in_place_no_padding(&mut settings, &key, &iv)?;
-    let start = (CTB_ENCRYPTED_SETTINGS_OFFSET + 264) as usize;
-    let end = start + CTB_ENCRYPTED_SETTINGS_SIZE as usize;
-    out[start..end].copy_from_slice(&settings);
+    let settings_start = (CTB_ENCRYPTED_SETTINGS_OFFSET + 264) as usize;
+    out[settings_start..settings_start + CTB_ENCRYPTED_SETTINGS_SIZE as usize].copy_from_slice(&settings);
 
     let mut header = Vec::with_capacity(CTB_ENCRYPTED_HEADER_SIZE as usize);
-    push_u32(&mut header, CTB_MAGIC_V5_ENCRYPTED);
-    push_u32(&mut header, CTB_ENCRYPTED_SETTINGS_SIZE);
-    push_u32(&mut header, CTB_ENCRYPTED_SETTINGS_OFFSET);
-    push_u32(&mut header, 0);
-    push_u32(&mut header, 5);
-    push_u32(&mut header, signature.len() as u32);
-    push_u32(&mut header, signature_offset);
-    push_u32(&mut header, 0);
-    push_u16(&mut header, 1);
-    push_u16(&mut header, 1);
-    push_u32(&mut header, 0);
-    push_u32(&mut header, 42);
-    push_u32(&mut header, 0);
+    write_encrypted_header(&mut header, build.version, signature.len() as u32, signature_offset);
     if header.len() != CTB_ENCRYPTED_HEADER_SIZE as usize {
         return Err(SlicerV3Error::UnsupportedOutput(format!(
             "internal encrypted CTB header size mismatch: expected {}, got {}",
-            CTB_ENCRYPTED_HEADER_SIZE,
-            header.len()
+            CTB_ENCRYPTED_HEADER_SIZE, header.len()
         )));
     }
     out[..CTB_ENCRYPTED_HEADER_SIZE as usize].copy_from_slice(&header);

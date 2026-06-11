@@ -27,9 +27,12 @@ pub(super) fn parse_ctb_format_version_hint(value: Option<&str>) -> Option<(u32,
         .collect();
 
     match normalized.as_str() {
-        "2" | "v2" | "3" | "v3" | "v2v3" | "ctbv2v3" => Some((5, false)),
-        "4" | "v4" | "v4v5" | "ctbv4v5" => Some((5, false)),
+        "2" | "v2" => Some((2, false)),
+        "3" | "v3" | "v2v3" | "ctbv2v3" => Some((3, false)),
+        "4" | "v4" | "v4v5" | "ctbv4v5" => Some((4, false)),
         "5" | "v5" => Some((5, false)),
+        "v3enc" | "v3encrypted" | "v3aes" | "ctbv3enc" => Some((3, true)),
+        "v4enc" | "v4encrypted" | "v4aes" | "ctbv4enc" => Some((4, true)),
         "v5enc" | "v5encrypted" | "v5encryption" | "v5aes" | "ctbv5enc" => Some((5, true)),
         _ => None,
     }
