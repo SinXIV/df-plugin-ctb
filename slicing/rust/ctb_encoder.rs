@@ -54,7 +54,7 @@ fn ctb_version_caps(version: u32) -> CtbVersionCaps {
             print_params_v4: true,
             resin_params: false,
             per_layer_settings_active_flag: 0x40,
-        },
+        }, //TODO Uniformation Magic V4
         _ => CtbVersionCaps {
             magic: CTB_MAGIC_V4_V5,
             extended_layer_def: true,
