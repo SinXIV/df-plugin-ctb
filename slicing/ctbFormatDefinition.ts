@@ -8,7 +8,12 @@ export const CTB_FORMAT_DEFINITION: SlicingFormatDefinition = {
   layerDataKind: 'raw-mask',
   pluginId: 'ctb',
   formatVersions: [
+    { value: 'v2', label: 'V2' },
+    { value: 'v3', label: 'V3' },
+    { value: 'v4', label: 'V4' },
     { value: 'v5', label: 'V5', isDefault: true },
+    { value: 'v3enc', label: 'V3 ENC' },
+    { value: 'v4enc', label: 'V4 ENC' },
     { value: 'v5enc', label: 'V5 ENC' },
   ],
   settingsModes: [

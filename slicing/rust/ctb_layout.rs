@@ -6,8 +6,8 @@ use crate::types::SliceJobV3;
 use super::ctb_metadata::parse_ctb_format_version_hint_from_job;
 use super::ctb_types::{CtbPreparedLayer, CTB_PAGE_SIZE};
 
-use super::ctb_v5::build_ctb_container_bytes_with_progress as build_ctb_v5_with_progress;
-use super::ctb_v5enc::build_ctb_encrypted_container_bytes_with_progress as build_ctb_v5enc_with_progress;
+use super::ctb_encoder::build_ctb_container_bytes_with_progress as build_ctb_v5_with_progress;
+use super::ctb_encoder::build_ctb_encrypted_container_bytes_with_progress as build_ctb_v5enc_with_progress;
 
 // === Shared utility functions for both encrypted and non-encrypted ===
 

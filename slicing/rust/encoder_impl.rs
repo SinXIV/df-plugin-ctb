@@ -3,8 +3,9 @@ mod ctb_layout;
 mod ctb_metadata;
 mod ctb_preview;
 mod ctb_types;
-mod ctb_v5;
-mod ctb_v5enc;
+//mod ctb_v5;
+//mod ctb_v5enc;
+mod ctb_encoder;
 
 use crate::encoders::FormatEncoder;
 use crate::encoders::RawMaskStreamEncoder;
